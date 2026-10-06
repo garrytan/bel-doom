@@ -22,6 +22,49 @@ export function splitPacket(out, tag, size) {
   };
 }
 
+// Sound packets: 'S' + lump name + '\n', written before the F packet. Returns the names and the leftover text.
+export function splitSounds(text) {
+  const sounds = [];
+  const rest = text.replace(/(?<![A-Z0-9_])S([A-Z0-9_\[\]-]{1,8})\n/g, (_, name) => { sounds.push(name); return ''; });
+  return { sounds, text: rest };
+}
+
+export function parseWad(bytes) {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const n = dv.getInt32(4, true), dir = dv.getInt32(8, true);
+  const lumps = new Map();
+  for (let i = 0; i < n; i++) {
+    const e = dir + i * 16, pos = dv.getInt32(e, true), size = dv.getInt32(e + 4, true);
+    const name = latin1(bytes.subarray(e + 8, e + 16)).replace(/\0.*$/s, '');
+    lumps.set(name, bytes.subarray(pos, pos + size));
+  }
+  return lumps;
+}
+
+// DMX format-3 sound lump -> { rate, samples: Float32Array in [-1, 1) }. Strips the 16-byte
+// pads at each end when present (id's lumps repeat the edge sample there; Freedoom's often have none).
+export function decodeDmx(lump) {
+  if (lump.length < 8) return null;
+  const dv = new DataView(lump.buffer, lump.byteOffset, lump.byteLength);
+  if (dv.getUint16(0, true) !== 3) return null;
+  const rate = dv.getUint16(2, true);
+  let pcm = lump.subarray(8, 8 + Math.min(dv.getUint32(4, true), lump.length - 8));
+  const flat = (a, b) => pcm.subarray(a, b).every((v) => v === pcm[a]);
+  if (pcm.length > 48 && flat(0, 16) && flat(pcm.length - 16, pcm.length)) pcm = pcm.subarray(16, pcm.length - 16);
+  const samples = new Float32Array(pcm.length);
+  for (let i = 0; i < pcm.length; i++) samples[i] = (pcm[i] - 128) / 128;
+  return { rate, samples };
+}
+
+export function loadSounds(wadBytes) {
+  const sounds = new Map();
+  for (const [name, lump] of parseWad(wadBytes)) {
+    const s = decodeDmx(lump);
+    if (s) sounds.set(name, s);
+  }
+  return sounds;
+}
+
 // Boots the interpreter and engine; returns the screen size, palette and a frame(keys) stepper.
 export function bootEngine({ Bel, readFile, wad = 'wad/e1m1.wad', status = () => {}, log = () => {} }) {
   const t0 = performance.now();
@@ -47,9 +90,10 @@ export function bootEngine({ Bel, readFile, wad = 'wad/e1m1.wad', status = () =>
       const out = bel.takeOutput();
       const ms = performance.now() - t;
       const f = splitPacket(out, 'F', n);
-      log(f.text);
-      if (!f.data) throw new Error(`doom-frame wrote no F packet of ${n} bytes (got ${out.length} bytes)`);
-      return { frame: f.data, ms, tic: ++tic };
+      if (!f.data) { log(f.text); throw new Error(`doom-frame wrote no F packet of ${n} bytes (got ${out.length} bytes)`); }
+      const s = splitSounds(f.text);
+      log(s.text);
+      return { frame: f.data, ms, tic: ++tic, sounds: s.sounds };
     },
   };
 }

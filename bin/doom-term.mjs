@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Terminal Doom player: runs the Bel engine in Node and draws truecolor half-block frames.
-// Usage: node bin/doom-term.mjs [--wad wad/e1m1.wad] [--root DIR] [--frames N] [--keys KEYS] [--hold MS] [--first-hold MS]
+// Usage: node bin/doom-term.mjs [--wad wad/e1m1.wad] [--root DIR] [--frames N] [--keys KEYS] [--hold MS] [--first-hold MS] [--bell]
+// Sound events are ignored, or ring the terminal bell with --bell.
 // Keys: WASD/arrows move, Q/E or Alt+left/right strafe, F fire, Space/U use, R toggles run
 // (Shift+letter/arrow also runs), Esc or Ctrl-C quits.
 import fs from 'node:fs';
@@ -8,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const opt = { root: path.resolve(here, '..'), wad: 'wad/e1m1.wad', frames: Infinity, keys: null, hold: 150, firstHold: 400 };
+const opt = { root: path.resolve(here, '..'), wad: 'wad/e1m1.wad', frames: Infinity, keys: null, hold: 150, firstHold: 400, bell: false };
 const argv = process.argv.slice(2);
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i], v = () => argv[++i];
@@ -18,7 +19,8 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--keys') opt.keys = v();
   else if (a === '--hold') opt.hold = Number(v());
   else if (a === '--first-hold') opt.firstHold = Number(v());
-  else { console.error('usage: node bin/doom-term.mjs [--wad PATH] [--root DIR] [--frames N] [--keys KEYS] [--hold MS] [--first-hold MS]'); process.exit(2); }
+  else if (a === '--bell') opt.bell = true;
+  else { console.error('usage: node bin/doom-term.mjs [--wad PATH] [--root DIR] [--frames N] [--keys KEYS] [--hold MS] [--first-hold MS] [--bell]'); process.exit(2); }
 }
 
 const { bootEngine, paletteRGBA32, columnsToRows, scaleIndexed, TIC_RATE } = await import(pathToFileURL(path.join(here, '../web/protocol.js')).href);
@@ -144,7 +146,7 @@ function loop() {
   const fps = stamps.length > 1 ? (stamps.length - 1) * 1000 / (t - stamps[0]) : 0;
   const status = ` BEL DOOM  fps ${fps.toFixed(1)}  ${f.ms.toFixed(0)} ms/frame  tic ${f.tic}  keys [${keys.padEnd(4)}]${alwaysRun ? '  RUN' : ''}  ` +
     `WASD/arrows Q/E F fire Space use R run Esc quit  ${logs.length ? '| ' + logs[logs.length - 1].slice(0, 40) : ''}`;
-  out.write(render(f.frame) + `\x1b[${dh / 2 + 1};1H\x1b[0;1;37;41m${status.slice(0, out.columns || 200)}\x1b[0m\x1b[K`);
+  out.write((opt.bell && f.sounds.length ? '\x07' : '') + render(f.frame) + `\x1b[${dh / 2 + 1};1H\x1b[0;1;37;41m${status.slice(0, out.columns || 200)}\x1b[0m\x1b[K`);
   setTimeout(loop, Math.max(0, 1000 / TIC_RATE - (performance.now() - t)));
 }
 function finish() {

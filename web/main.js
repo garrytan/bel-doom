@@ -1,4 +1,4 @@
-import { displaySize, paletteRGBA32 } from './protocol.js';
+import { displaySize, paletteRGBA32, loadSounds } from './protocol.js';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('screen');
@@ -14,6 +14,69 @@ let latest = null, drawPending = false, loading = true, paused = false;
 const loadStart = performance.now();
 const frameTimes = [];
 let lastMs = 0, lastTic = 0;
+
+const sound = { lumps: null, ctx: null, gain: null, buffers: new Map(), voices: [], missing: new Set(),
+  muted: localStorage.getItem('beldoom-muted') === '1', error: null };
+fetch(new URL('../wad/sounds.wad', import.meta.url))
+  .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(`wad/sounds.wad: HTTP ${r.status}`))))
+  .then((b) => { sound.lumps = loadSounds(new Uint8Array(b)); })
+  .catch((e) => { sound.error = e.message; console.warn('[bel-doom] no sound:', e.message); })
+  .finally(soundLabel);
+
+function soundLabel() {
+  const state = sound.error ? 'unavailable' : !sound.lumps ? 'loading' : sound.muted ? 'muted' :
+    sound.ctx && sound.ctx.state === 'running' ? 'on' : 'press a key';
+  $('snd').innerHTML = `sound <b>${state}</b> (M)`;
+}
+
+function unlockAudio() {
+  if (!sound.ctx) {
+    try { sound.ctx = new AudioContext(); } catch { return; }
+    sound.gain = sound.ctx.createGain();
+    sound.gain.gain.value = 0.6;
+    sound.gain.connect(sound.ctx.destination);
+    sound.ctx.onstatechange = soundLabel;
+  }
+  if (sound.ctx.state === 'suspended') sound.ctx.resume().then(soundLabel, () => {});
+}
+
+function soundBuffer(name) {
+  let buf = sound.buffers.get(name);
+  if (buf) return buf;
+  const s = sound.lumps.get(name);
+  if (!s) {
+    if (!sound.missing.has(name)) { sound.missing.add(name); console.warn(`[bel-doom] no sound lump ${name}`); }
+    return null;
+  }
+  buf = sound.ctx.createBuffer(1, s.samples.length, s.rate);
+  buf.copyToChannel(s.samples, 0);
+  sound.buffers.set(name, buf);
+  return buf;
+}
+
+function stopVoice(v) { v.onended = null; try { v.stop(); } catch {} }
+
+function playSounds(names) {
+  if (!names || !names.length || sound.muted || !sound.lumps || !sound.ctx || sound.ctx.state !== 'running') return;
+  for (const name of new Set(names)) {
+    const buf = soundBuffer(name);
+    if (!buf) continue;
+    while (sound.voices.length >= 8) stopVoice(sound.voices.shift());
+    const v = sound.ctx.createBufferSource();
+    v.buffer = buf;
+    v.connect(sound.gain);
+    v.onended = () => { const i = sound.voices.indexOf(v); if (i >= 0) sound.voices.splice(i, 1); };
+    v.start();
+    sound.voices.push(v);
+  }
+}
+
+function toggleMute() {
+  sound.muted = !sound.muted;
+  localStorage.setItem('beldoom-muted', sound.muted ? '1' : '0');
+  if (sound.muted) sound.voices.splice(0).forEach(stopVoice);
+  soundLabel();
+}
 
 function setOverlay(big, text, isError) {
   overlay.classList.remove('hidden');
@@ -61,6 +124,7 @@ worker.onmessage = (e) => {
   } else if (m.type === 'frame') {
     if (loading) { loading = false; overlay.classList.add('hidden'); }
     latest = m.frame; lastMs = m.ms; lastTic = m.tic;
+    playSounds(m.sounds);
     frameTimes.push(performance.now());
     if (!drawPending) { drawPending = true; requestAnimationFrame(draw); }
   }
@@ -114,7 +178,10 @@ function syncKeys() {
   $('held').innerHTML = `keys <b>${k || '-'}</b>`;
 }
 
+addEventListener('pointerdown', unlockAudio);
 addEventListener('keydown', (e) => {
+  unlockAudio();
+  if (e.code === 'KeyM' && !e.repeat) { toggleMute(); return; }
   if (e.code === 'Escape' && !loading && src) {
     paused = !paused;
     worker.postMessage({ type: 'pause', paused });
