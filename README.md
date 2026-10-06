@@ -90,6 +90,7 @@ Even randomness is pure. Doom's `P_Random` reads from a fixed table of 256 bytes
 | [`level.bel`](doom/level.bel) | 168 | vertexes, linedefs, sidedefs, sectors, segs, subsectors, BSP nodes, a blockmap, line of sight |
 | [`render.bel`](doom/render.bel) | 502 | the BSP renderer: view transform, near-plane clipping, perspective-correct textures with pegging, floors and ceilings, sky, light diminishing, fences and grates, sprites with 8 rotations clipped against walls, the weapon, damage and pickup tints |
 | [`actors.bel`](doom/actors.bel) | 324 | zombieman, shotgun guy, imp and demon (sight, chase, attack, pain, death) and barrels with chain explosions |
+| [`hires.bel`](doom/hires.bel) | 7 | screen constants for 320x200, loaded before `doom-init` when `?hires=1` |
 | [`game.bel`](doom/game.bel) | 375 | movement, collision and stepping, the pistol with autoaim, doors, lifts, switches, walk-over triggers, pickups, status bar and face, death and respawn |
 
 Bel has no arrays, so everything is lists. The frame is a list of 160 columns of 100 palette indices (Doom draws walls in columns too). Textures are lists of circular column lists, so wrapping around a texture costs nothing.
@@ -208,7 +209,7 @@ To rebuild the WADs from Freedoom 0.13.0: `FREEDOOM_WAD=path/to/freedoom1.wad py
 
 Bel is by Paul Graham; `interp/bel.bel` is his spec, included unmodified. The maps, textures, sprites and sounds are from [Freedoom](https://freedoom.github.io/) 0.13.0 (BSD license, see `wad/COPYING-freedoom.txt`). Doom is by id Software.
 
-The code in this repository is MIT licensed; see [LICENSE](LICENSE).
+This repository's own code is MIT licensed; see [LICENSE](LICENSE). The license does not cover `interp/bel.bel`, which is Paul Graham's spec, included unmodified and published without a license of its own, or the Freedoom assets in `wad/`, which stay under Freedoom's BSD license.
 
 ## Changelog
 
