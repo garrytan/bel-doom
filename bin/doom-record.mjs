@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // Headless recorder: runs the Bel Doom engine on a scripted key sequence and writes PNGs, MP4 and/or GIF.
 //   node bin/doom-record.mjs [--script "w:35 wd:20 f:5 -:10"] [--script-file F] [--frames N]
-//        [--out DIR] [--mp4 FILE] [--gif FILE] [--wav FILE] [--raw FILE|-] [--scale S] [--gif-scale S] [--gif-fps F] [--fps 35] [--hires]
+//        [--out DIR] [--mp4 FILE] [--gif FILE] [--wav FILE] [--raw FILE|-] [--scale S] [--gif-scale S] [--gif-fps F] [--fps 35] [--hires | --res WxH] [--tier closure]
 //        [--sounds wad/sounds.wad] [--audio-rate 22050] [--no-audio] [--wad wad/e1m1.wad] [--root DIR] [--quiet]
 // A script is whitespace/comma separated KEYS:TICS steps (KEYS from "wsadqerfu", "-" or empty = none).
 // One tic = one doom-frame call = one output frame. --frames N truncates the script or pads it with idle tics.
-// --hires runs at 320x200. Default scales give 640x480 PNG/MP4 and a 320x240 GIF at either detail.
+// --hires runs at 320x200 and --res WxH at any size the engine's doom-init accepts. Default scales give 640x480 PNG/MP4 and a 320x240 GIF at either detail.
 // The engine's S<lump> sound events are mixed from sounds.wad into the MP4's AAC track (and --wav), at tic times.
 import './bigstack.mjs';
 import fs from 'node:fs';
@@ -16,7 +16,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const DEMO = '-:10 w:40 wd:12 w:30 wa:18 wr:25 f:8 -:8 f:8 u:2 s:12 e:16 q:16 d:30 wr:30 a:20 w:20';
-const opt = { root: path.resolve(here, '..'), wad: 'wad/e1m1.wad', script: null, frames: null, out: null, mp4: null, gif: null, raw: null, wav: null, sounds: 'wad/sounds.wad', audio: true, audioRate: 22050, scale: null, gifScale: null, gifFps: null, fps: 35, quiet: false, hires: false };
+const opt = { root: path.resolve(here, '..'), wad: 'wad/e1m1.wad', script: null, frames: null, out: null, mp4: null, gif: null, raw: null, wav: null, sounds: 'wad/sounds.wad', audio: true, audioRate: 22050, scale: null, gifScale: null, gifFps: null, fps: 35, quiet: false, hires: false, res: null, tier: null };
 const argv = process.argv.slice(2);
 const usage = () => { console.error(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 9).join('\n').replace(/^\/\/ ?/gm, '')); process.exit(2); };
 for (let i = 0; i < argv.length; i++) {
@@ -24,6 +24,8 @@ for (let i = 0; i < argv.length; i++) {
   if (a === '--root') opt.root = path.resolve(v());
   else if (a === '--wad') opt.wad = v();
   else if (a === '--hires') opt.hires = true;
+  else if (a === '--res') opt.res = v();
+  else if (a === '--tier') opt.tier = v();
   else if (a === '--script') opt.script = v();
   else if (a === '--script-file') opt.script = fs.readFileSync(v(), 'utf8').replace(/#.*$/gm, '');
   else if (a === '--frames') opt.frames = Number(v());
@@ -52,7 +54,7 @@ for (const tok of (opt.script ?? (opt.frames ? '' : DEMO)).split(/[\s,]+/).filte
 let total = opt.frames ?? steps.length;
 if (!total) { console.error('nothing to record: empty script'); process.exit(2); }
 
-const { bootEngine, columnsToRows, scaleIndexed, displaySize, loadSounds } = await import(pathToFileURL(path.join(here, '../web/protocol.js')).href);
+const { bootEngine, parseRes, columnsToRows, scaleIndexed, displaySize, loadSounds } = await import(pathToFileURL(path.join(here, '../web/protocol.js')).href);
 const { Bel } = await import(pathToFileURL(path.join(opt.root, 'interp/bel.js')).href);
 const say = (s) => { if (!opt.quiet) process.stderr.write(s + '\n'); };
 
@@ -62,6 +64,8 @@ const eng = bootEngine({
   readFile,
   wad: opt.wad,
   hires: opt.hires,
+  res: parseRes(opt.res),
+  compile: opt.tier === 'closure' ? false : undefined,
   status: (s) => say(`bel-doom: ${s}`),
   log: (s) => { if (s && !opt.quiet) process.stderr.write(s.replace(/^/gm, '  | ').replace(/  \| $/, '')); },
 });

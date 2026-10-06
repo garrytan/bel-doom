@@ -1,12 +1,11 @@
 #!/usr/bin/env node
-// Real-time proof: plays the web page in headless Chromium, presses the keys of a doom-record script
-// (one step per engine tic, synchronized to the frames the page receives), and screen-records it to MP4.
-// Keys are dispatched as keyboard events inside the page the moment frame N arrives, so they reach the
-// worker before it starts tic N+1 (driving them over DevTools adds a round trip that loses that race).
-//   node bin/doom-live.mjs --script-file bin/demo-route.txt --out live.mp4 [--root DIR] [--hires]
-//        [--port 8099] [--width 1100] [--height 800] [--tail 35] [--chrome chromium]
-// Prints the measured live fps (engine tics per wall-clock second) and how many tics got different
-// keys than scripted (key events race the worker's frame loop, so a few may land a tic late).
+// Real-time proof: plays the web page in headless Chromium and screen-records it to MP4. The page starts
+// paused; the whole per-tic key script (doom-record format, one step per engine tic) goes to the worker,
+// which takes one step per tic in its own 35 Hz scheduler, independent of how many frames get drawn.
+//   node bin/doom-live.mjs --script-file bin/demo-route.txt --out live.mp4 [--root DIR] [--res WxH | --hires]
+//        [--tier closure] [--port 8099] [--width 1100] [--height 800] [--tail 35] [--chrome chromium] [--no-video]
+// Prints presented fps (frames drawn per second), game speed (tics per second, 35 is real time) and the
+// p50/p95 time between presented frames.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,7 +13,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const opt = { root: path.resolve(here, '..'), script: null, out: 'live.mp4', hires: false, port: 8099, width: 1100, height: 800, tail: 35, chrome: 'chromium' };
+const opt = { root: path.resolve(here, '..'), script: null, out: 'live.mp4', hires: false, res: null, tier: null, video: true, port: 8099, width: 1100, height: 800, tail: 35, chrome: 'chromium' };
 const argv = process.argv.slice(2);
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i], v = () => argv[++i];
@@ -23,6 +22,9 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--script-file') opt.script = fs.readFileSync(v(), 'utf8').replace(/#.*$/gm, '');
   else if (a === '--out') opt.out = v();
   else if (a === '--hires') opt.hires = true;
+  else if (a === '--res') opt.res = v();
+  else if (a === '--tier') opt.tier = v();
+  else if (a === '--no-video') opt.video = false;
   else if (a === '--port') opt.port = Number(v());
   else if (a === '--width') opt.width = Number(v());
   else if (a === '--height') opt.height = Number(v());
@@ -96,68 +98,68 @@ await send('Page.enable');
 await send('Emulation.setDeviceMetricsOverride', { width: opt.width, height: opt.height, deviceScaleFactor: 1, mobile: false });
 await send('Runtime.addBinding', { name: '__belFrame' });
 await send('Page.addScriptToEvaluateOnNewDocument', { source: `{
-  const CODES = { w: 'KeyW', s: 'KeyS', a: 'KeyA', d: 'KeyD', q: 'KeyQ', e: 'KeyE', r: 'ShiftLeft', f: 'KeyF', u: 'KeyU' };
-  let held = '';
-  window.__belPress = (keys) => {
-    for (const c of held) if (!keys.includes(c)) window.dispatchEvent(new KeyboardEvent('keyup', { code: CODES[c], key: c, bubbles: true }));
-    for (const c of keys) if (!held.includes(c)) window.dispatchEvent(new KeyboardEvent('keydown', { code: CODES[c], key: c, bubbles: true }));
-    held = keys;
-  };
+  window.__belFrames = [];
   const W = window.Worker;
   window.Worker = class extends W {
     constructor(...a) {
       super(...a);
+      window.__belWorker = this;
       this.addEventListener('message', (e) => {
-        if (e.data && e.data.type === 'frame') {
-          if (window.__belSchedule) window.__belPress(window.__belSchedule[e.data.tic] ?? '');
-          window.__belFrame(JSON.stringify({ tic: e.data.tic, keys: e.data.keys || '' }));
+        const m = e.data;
+        if (!m) return;
+        if (m.type === 'init') window.__belFrame(JSON.stringify({ tic: 0 }));
+        if (m.type === 'frame') {
+          window.__belFrames.push([performance.now(), m.tic, m.tics || 1, m.step || 0, m.render || 0, m.write || 0, m.dropped || 0]);
+          window.__belFrame(JSON.stringify({ tic: m.tic }));
         }
-        if (e.data && e.data.type === 'init') window.__belFrame(JSON.stringify({ tic: 0, keys: '' }));
       });
     }
   };
 }` });
-const url = `http://127.0.0.1:${opt.port}/web/?paused=1${opt.hires ? '&hires=1' : ''}`;
+const url = `http://127.0.0.1:${opt.port}/web/?paused=1${opt.res ? `&res=${opt.res}` : opt.hires ? '&hires=1' : ''}${opt.tier ? `&tier=${opt.tier}` : ''}`;
 console.error(`doom-live: loading ${url}`);
 await send('Page.navigate', { url });
 
 await new Promise((res) => { onTic = () => { onTic = null; res(); }; });
 console.error(`doom-live: engine loaded (page started paused), recording ${steps.length} tics`);
-await send('Page.startScreencast', { format: 'jpeg', quality: 85, maxWidth: opt.width, maxHeight: opt.height, everyNthFrame: 1 });
-await sleep(1500);
+if (opt.video) await send('Page.startScreencast', { format: 'jpeg', quality: 85, maxWidth: opt.width, maxHeight: opt.height, everyNthFrame: 1 });
+await sleep(opt.video ? 1500 : 200);
 
-// Frame k of the script runs as engine tic k + 1: hold its keys, press Esc to unpause; the page then
-// presses each later step's keys when the previous tic's frame arrives.
-const base = 0;
-await send('Runtime.evaluate', { expression: `window.__belSchedule = ${JSON.stringify(steps)}; window.__belPress(window.__belSchedule[0]);` });
+// The worker takes script step k on tic k + 1; Esc unpauses the page and starts the clock.
+await send('Runtime.evaluate', { expression: `window.__belWorker.postMessage({ type: 'script', steps: ${JSON.stringify(steps)} })` });
 const wallStart = performance.now();
 await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', code: 'Escape', key: 'Escape', windowsVirtualKeyCode: 27 });
 await send('Input.dispatchKeyEvent', { type: 'keyUp', code: 'Escape', key: 'Escape', windowsVirtualKeyCode: 27 });
-const endTic = base + steps.length;
+const endTic = steps.length;
 if (ticLog[ticLog.length - 1].tic < endTic) await new Promise((res) => { onTic = (t) => { if (t >= endTic) { onTic = null; res(); } }; });
 const wall = (performance.now() - wallStart) / 1000;
 const pageFps = (await send('Runtime.evaluate', { expression: `document.getElementById('fps').innerText + ' | ' + document.getElementById('tic').innerText`, returnByValue: true })).result.value;
 await sleep(300);
-await send('Page.stopScreencast');
-while (Date.now() - lastFrameAt < 300) await sleep(100);
+if (opt.video) {
+  await send('Page.stopScreencast');
+  while (Date.now() - lastFrameAt < 300) await sleep(100);
+}
 
-const byTic = new Map(ticLog.map((x) => [x.tic, x.keys]));
-const slipped = [];
-for (let k = 0; k < steps.length; k++) if ((byTic.get(base + k + 1) ?? '') !== steps[k]) slipped.push(`tic ${k + 1}: ${byTic.get(base + k + 1) || '-'} not ${steps[k] || '-'}`);
-const slips = slipped.length;
-if (slips) console.error(`doom-live: key mismatches: ${slipped.slice(0, 8).join(', ')}${slips > 8 ? ', ...' : ''}`);
-const live = ticLog.filter((x) => x.tic > base && x.tic <= endTic);
-const fps = (live.length - 1) * 1000 / (live[live.length - 1].at - live[0].at);
-
-const list = frames.map((f, i) => `file '${f.file}'\nduration ${Math.max(0.001, ((frames[i + 1] || f).t - f.t) || 1 / 30).toFixed(4)}`).join('\n') + `\nfile '${frames[frames.length - 1].file}'\n`;
-fs.writeFileSync(path.join(tmp, 'list.txt'), list);
-const enc = spawnSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', path.join(tmp, 'list.txt'),
-  '-vf', 'fps=30,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p', '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-movflags', '+faststart', opt.out], { stdio: 'inherit' });
-if (enc.status !== 0) throw new Error('ffmpeg failed');
-const duration = frames[frames.length - 1].t - frames[0].t;
-console.error(`doom-live: ${steps.length} tics in ${wall.toFixed(1)} s wall = ${fps.toFixed(1)} fps live (page shows: ${pageFps}); ` +
-  `${slips}/${steps.length} tics got different keys than scripted`);
-console.error(`doom-live: wrote ${opt.out} (${frames.length} screencast frames over ${duration.toFixed(1)} s)`);
+const log = (await send('Runtime.evaluate', { expression: 'window.__belFrames', returnByValue: true })).result.value
+  .filter(([, tic]) => tic <= endTic);
+const span = (log[log.length - 1][0] - log[0][0]) / 1000;
+const fps = (log.length - 1) / span;
+const speed = (log[log.length - 1][1] - log[0][1]) / span;
+const gaps = log.slice(1).map((f, i) => f[0] - log[i][0]).sort((a, b) => a - b);
+const pct = (q) => gaps[Math.min(gaps.length - 1, Math.floor(q * gaps.length))];
+const mean = (i) => log.reduce((a, f) => a + f[i], 0) / log.length;
+console.error(`doom-live: ${steps.length} tics, ${log.length} frames in ${wall.toFixed(1)} s: ${fps.toFixed(1)} fps presented, ` +
+  `game speed ${speed.toFixed(1)} tics/s, frame time p50 ${pct(0.5).toFixed(0)} ms p95 ${pct(0.95).toFixed(0)} ms, ` +
+  `${mean(2).toFixed(2)} tics/frame, step ${mean(3).toFixed(1)} ms + render ${mean(4).toFixed(1)} ms + write ${mean(5).toFixed(1)} ms per frame, ` +
+  `${log[log.length - 1][6]} tics dropped (page: ${pageFps})`);
+if (opt.video) {
+  const list = frames.map((f, i) => `file '${f.file}'\nduration ${Math.max(0.001, ((frames[i + 1] || f).t - f.t) || 1 / 30).toFixed(4)}`).join('\n') + `\nfile '${frames[frames.length - 1].file}'\n`;
+  fs.writeFileSync(path.join(tmp, 'list.txt'), list);
+  const enc = spawnSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', path.join(tmp, 'list.txt'),
+    '-vf', 'fps=30,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p', '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-movflags', '+faststart', opt.out], { stdio: 'inherit' });
+  if (enc.status !== 0) throw new Error('ffmpeg failed');
+  console.error(`doom-live: wrote ${opt.out} (${frames.length} screencast frames over ${(frames[frames.length - 1].t - frames[0].t).toFixed(1)} s)`);
+}
 cleanup();
 fs.rmSync(tmp, { recursive: true, force: true });
 process.exit(0);

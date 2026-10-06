@@ -62,6 +62,28 @@ class Stream {
     this.buf[this.len++] = b;
     if (this.sink && this.len >= 65536) this.flush();
   }
+  writeString(x) {
+    // One pass over a list of characters with codes below 256. On anything else
+    // it undoes its partial write and returns false.
+    const start = this.len;
+    let buf = this.buf;
+    let i = start;
+    let p = x;
+    for (; p instanceof Pair; p = p.d) {
+      const c = p.a;
+      if (!(c instanceof Char) || c.c > 255) { this.len = start; return false; }
+      if (i === buf.length) {
+        const nb = new Uint8Array(buf.length * 2);
+        nb.set(buf);
+        this.buf = buf = nb;
+      }
+      buf[i++] = c.c;
+    }
+    if (p !== NIL) { this.len = start; return false; }
+    this.len = i;
+    if (this.sink && this.len >= 65536) this.flush();
+    return true;
+  }
   flush() {
     if (this.sink && this.len) {
       this.sink(this.buf.slice(0, this.len));
@@ -925,7 +947,7 @@ function globeList() {
 // JS stack, and run() trampolines it.  Anything unusual (where-mode, dyn,
 // after, ccc, def, mac) is delegated to ev, so the two agree by construction.
 
-const COMPILE = !(typeof process !== 'undefined' && process.env && process.env.BEL_NOCOMPILE);
+let COMPILE = !(typeof process !== 'undefined' && process.env && process.env.BEL_NOCOMPILE);
 const TC = { env: null, node: null };
 
 function run(node, env) {
@@ -2234,8 +2256,12 @@ jet('print', (a) => {
 });
 function prnice(x, s) {
   if (x instanceof Char) prc(x, s);
-  else if (x !== NIL && isString(x)) for (let p = x; p instanceof Pair; p = p.d) prc(p.a, s);
-  else printTo(x, s);
+  else if (x instanceof Pair) {
+    const st = s instanceof Stream ? s : s === NIL ? stdoutStream : null;
+    if (st !== null && st.dir === 'out' && !st.closed && st.wbits === 0 && st.writeString(x)) return;
+    if (isString(x)) for (let p = x; p instanceof Pair; p = p.d) prc(p.a, s);
+    else printTo(x, s);
+  } else printTo(x, s);
 }
 jet('pr', (a) => {
   const s = outStream([], 0);
@@ -2308,11 +2334,13 @@ let booted = false;
  * @param {() => number} [opts.stdin]  next byte of the default input stream (ins = nil), or -1 at end
  * @param {string} [opts.belSource]  text of bel.bel; defaults to readFile('interp/bel.bel')
  * @param {(command: string) => boolean} [opts.sys]  implementation of the sys primitive
+ * @param {boolean} [opts.compile]  false runs everything on the closure tier (same as BEL_NOCOMPILE=1)
  */
 export class Bel {
   constructor(opts = {}) {
     if (booted) throw new Error('only one Bel instance per JS realm');
     booted = true;
+    if (opts.compile === false) COMPILE = false;
     host = {
       readFile: opts.readFile || (() => null),
       writeFile: opts.writeFile || null,
@@ -2379,6 +2407,20 @@ export class Bel {
     } finally {
       stdoutStream.flush();
     }
+  }
+  /**
+   * Switches jets off (back to bel.bel's own definitions) or on again. Names in
+   * `keep` stay native. Returns the names that were switched.
+   */
+  setJets(enabled, keep = []) {
+    const switched = [];
+    for (const [name, { fn, loc }] of Object.entries(jets)) {
+      if (keep.includes(name) || !(name in orig)) continue;
+      const cell = globalCell(sym(name));
+      cell.d = enabled ? mkprim(name, fn, loc) : orig[name];
+      switched.push(name);
+    }
+    return switched;
   }
   /** Bytes written to the default output since the last call (when there is no stdout sink). */
   takeOutput() { return stdoutStream.take(); }

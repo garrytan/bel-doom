@@ -65,6 +65,7 @@ const bel = new Bel({
   stdin: () => byte,                       // optional: next input byte, or -1 at end of input
   belSource: '...',                        // optional: text of bel.bel; otherwise readFile('interp/bel.bel')
   sys: (command) => boolean,               // optional: implementation of the sys primitive
+  compile: false,                          // optional: run everything on the closure tier
 });
 ```
 
@@ -80,13 +81,14 @@ const bel = new Bel({
 | `bel.str(s)`, `bel.jsstr(x)` | Converts a JS string to a Bel string (a list of characters) and back |
 | `bel.list(...xs)`, `bel.toArray(l)` | Builds a Bel list; converts a proper list to an array |
 | `bel.sym(name)` | The interned symbol `name` |
+| `bel.setJets(enabled, keep)` | Switches jets off (back to `bel.bel`'s own definitions) or on again, except the names in `keep`; returns the names switched. `test/jets-off.mjs` uses it to show a frame rendered with PG's definitions is identical |
 | `bel.nil`, `bel.t` | The symbols `nil` and `t` |
 
 Errors that no Bel handler catches surface as a thrown `BelError`. Its `.value` is the Bel error value (usually a symbol such as `mistype` or a list such as `(unboundb foo)`), and its message is the printed form, with the parameter list added for arity and destructuring errors. Output written before an error stays in the buffer, so call `flush()` or `takeOutput()` in your error handler.
 
 Symbols and characters are interned per JavaScript realm, so there can be one `Bel` per realm (one per Node process, worker or page). Constructing a second throws.
 
-Setting the environment variable `BEL_NOCOMPILE=1` in Node turns off the [compiler](#the-compiler) and runs everything through the tree-walking evaluator, which is useful for checking that the two agree.
+The `compile: false` option, or the environment variable `BEL_NOCOMPILE=1` in Node, turns off the [compiler](#the-compiler) and runs everything through the tree-walking evaluator, which is useful for checking that the two agree.
 
 ## How Bel values look in JavaScript
 

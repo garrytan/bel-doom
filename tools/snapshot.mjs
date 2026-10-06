@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Run the Bel Doom engine headless and write the last frame as a PNG.
 //
-//   node tools/snapshot.mjs [--hires] [--keys "w"]... [--tics N] [--out out.png] [--scale S]
+//   node tools/snapshot.mjs [--size WxH | --hires] [--keys "w"]... [--tics N] [--out out.png] [--scale S]
 //
 // --keys sets the held keys for the following --tics tics, and can repeat:
 //   node tools/snapshot.mjs --keys "" --tics 1 --keys w --tics 10 --keys a --tics 5
@@ -18,7 +18,7 @@ import { fileURLToPath } from 'url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
-let out = 'snapshot.png', scale = 4, keys = '', plan = [], every = 0, hires = false;
+let out = 'snapshot.png', scale = 4, keys = '', plan = [], every = 0, size = [160, 100];
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
   if (a === '--out') out = args[++i];
@@ -26,7 +26,8 @@ for (let i = 0; i < args.length; i++) {
   else if (a === '--keys') keys = args[++i];
   else if (a === '--tics') plan.push([keys, +args[++i]]);
   else if (a === '--every') every = +args[++i];
-  else if (a === '--hires') hires = true;
+  else if (a === '--hires') size = [320, 200];
+  else if (a === '--size') size = args[++i].split('x').map(Number);
   else if (a === '--script') for (const step of args[++i].split(/[\s,]+/).filter(Boolean)) {
     const [k, n] = step.split(':');
     plan.push([k === '-' ? '' : k, +n]);
@@ -41,13 +42,12 @@ const bel = new Bel({
 });
 let t0 = performance.now();
 bel.loadFile('doom/main.bel');
-if (hires) bel.evalString('(set screen-w 320 screen-h 200 view-h 168 half-w 160 half-h 84 focal 160)');
-let world = bel.call('doom-init', 'wad/e1m1.wad');
+let world = bel.call('doom-init', 'wad/e1m1.wad', size[0], size[1]);
 const init = bel.takeOutput();
 console.log(`init ${(performance.now() - t0).toFixed(0)} ms`);
 if (init[0] !== 80 || init.length !== 769) throw new Error('bad palette packet');
 const pal = init.subarray(1);
-const w = bel.global('screen-w'), h = bel.global('screen-h');
+const [w, h] = size;
 
 const crcTable = new Int32Array(256).map((_, n) => {
   let c = n;

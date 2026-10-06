@@ -1,4 +1,4 @@
-import { displaySize, paletteRGBA32, loadSounds } from './protocol.js';
+import { displaySize, paletteRGBA32, loadSounds, parseRes } from './protocol.js';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('screen');
@@ -13,7 +13,9 @@ let w = 0, h = 0, pal32 = null, src = null, srcCtx = null, img = null, img32 = n
 let latest = null, drawPending = false, loading = true, paused = false;
 const loadStart = performance.now();
 const frameTimes = [];
-let lastMs = 0, lastTic = 0;
+const ticTimes = [];
+const stats = [];
+let lastTic = 0, dropped = 0, split = false, debug = false;
 
 const sound = { lumps: null, ctx: null, gain: null, buffers: new Map(), voices: [], missing: new Set(),
   muted: localStorage.getItem('beldoom-muted') === '1', error: null };
@@ -58,7 +60,7 @@ function stopVoice(v) { v.onended = null; try { v.stop(); } catch {} }
 
 function playSounds(names) {
   if (!names || !names.length || sound.muted || !sound.lumps || !sound.ctx || sound.ctx.state !== 'running') return;
-  for (const name of new Set(names)) {
+  for (const name of names) {
     const buf = soundBuffer(name);
     if (!buf) continue;
     while (sound.voices.length >= 8) stopVoice(sound.voices.shift());
@@ -100,10 +102,26 @@ setInterval(() => {
   }
   const now = performance.now();
   while (frameTimes.length && now - frameTimes[0] > 2000) frameTimes.shift();
+  while (ticTimes.length > 1 && now - ticTimes[0][0] > 2000) ticTimes.shift();
   const fps = frameTimes.length > 1 ? (frameTimes.length - 1) * 1000 / (frameTimes[frameTimes.length - 1] - frameTimes[0]) : 0;
+  const [t0, k0] = ticTimes[0] || [0, 0], [t1, k1] = ticTimes[ticTimes.length - 1] || [0, 0];
+  const speed = t1 > t0 && !paused ? (k1 - k0) * 1000 / (t1 - t0) : 0;
   $('fps').innerHTML = `fps <b>${fps.toFixed(1)}</b>`;
-  $('tic').innerHTML = `tic <b>${lastTic}</b> &middot; <b>${lastMs.toFixed(0)}</b> ms/frame in Bel`;
+  $('tic').innerHTML = `tic <b>${lastTic}</b> &middot; game <b>${speed.toFixed(1)}</b> tics/s`;
+  if (debug) showStats(fps, speed);
 }, 250);
+
+// Debug overlay (backtick): per presented frame, averaged over the last 30.
+function showStats(fps, speed) {
+  const avg = (k) => stats.reduce((a, s) => a + s[k], 0) / Math.max(1, stats.length);
+  const rows = [
+    [`${w}x${h}`, split ? 'tick/draw clock' : 'one doom-frame per tic'],
+    ['fps', fps.toFixed(1)], ['game', `${speed.toFixed(1)} tics/s`], ['tics/frame', avg('tics').toFixed(2)],
+    ['step', `${avg('step').toFixed(1)} ms`], ['render', `${avg('render').toFixed(1)} ms`], ['write', `${avg('write').toFixed(1)} ms`],
+    ['transfer', `${avg('transfer').toFixed(1)} ms`], ['draw', `${avg('draw').toFixed(1)} ms`], ['dropped', `${dropped} tics`],
+  ];
+  $('debug').textContent = rows.map(([k, v]) => `${k.padEnd(11)}${v}`).join('\n');
+}
 
 worker.onmessage = (e) => {
   const m = e.data;
@@ -111,7 +129,7 @@ worker.onmessage = (e) => {
   else if (m.type === 'log') { console.log('[bel]', m.text.replace(/\n$/, '')); }
   else if (m.type === 'error') { fail(m.text); }
   else if (m.type === 'init') {
-    ({ w, h } = m);
+    ({ w, h, split } = m);
     pal32 = paletteRGBA32(m.palette);
     src = document.createElement('canvas'); src.width = w; src.height = h;
     srcCtx = src.getContext('2d');
@@ -120,19 +138,22 @@ worker.onmessage = (e) => {
     const [dw, dh] = displaySize(w, h, Math.max(1, Math.round(800 / w)));
     canvas.width = dw; canvas.height = dh;
     if (startPaused) { loading = false; paused = true; setOverlay('READY', 'press Esc to start'); }
-    else setOverlay('LOADING', 'running the first tic (doom-frame)');
+    else setOverlay('LOADING', 'running the first tic');
     console.log(`[bel-doom] ready in ${(m.ms / 1000).toFixed(1)} s, screen ${w}x${h} -> ${dw}x${dh}`);
   } else if (m.type === 'frame') {
     if (loading) { loading = false; overlay.classList.add('hidden'); }
-    latest = m.frame; lastMs = m.ms; lastTic = m.tic;
+    latest = m.frame; lastTic = m.tic; dropped = m.dropped;
     playSounds(m.sounds);
-    frameTimes.push(performance.now());
+    ticTimes.push([performance.now(), m.tic]);
+    stats.push({ tics: m.tics, step: m.step, render: m.render, write: m.write, transfer: performance.timeOrigin + performance.now() - m.sentAt, draw: 0 });
+    if (stats.length > 30) stats.shift();
     if (!drawPending) { drawPending = true; requestAnimationFrame(draw); }
   }
 };
 
 function draw() {
   drawPending = false;
+  const t = performance.now();
   const f = latest;
   for (let x = 0; x < w; x++) {
     const col = x * h;
@@ -141,6 +162,8 @@ function draw() {
   srcCtx.putImageData(img, 0, 0);
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(src, 0, 0, canvas.width, canvas.height);
+  frameTimes.push(performance.now());
+  if (stats.length) stats[stats.length - 1].draw = performance.now() - t;
 }
 
 const held = new Set();
@@ -183,9 +206,10 @@ addEventListener('pointerdown', unlockAudio);
 addEventListener('keydown', (e) => {
   unlockAudio();
   if (e.code === 'KeyM' && !e.repeat) { toggleMute(); return; }
+  if (e.code === 'Backquote' && !e.repeat) { debug = !debug; $('debug').classList.toggle('hidden', !debug); return; }
   if (e.code === 'Escape' && !loading && src) {
     paused = !paused;
-    worker.postMessage({ type: 'pause', paused });
+    worker.postMessage({ type: 'pause', paused: paused || document.hidden });
     if (paused) setOverlay('PAUSED', 'press Esc to resume'); else overlay.classList.add('hidden');
     sentKeys = null; syncKeys();
     return;
@@ -203,15 +227,24 @@ addEventListener('keyup', (e) => {
 });
 const releaseAll = () => { held.clear(); syncKeys(); };
 addEventListener('blur', releaseAll);
-document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAll(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) releaseAll();
+  worker.postMessage({ type: 'pause', paused: paused || document.hidden });
+});
 
 addEventListener('beforeunload', (e) => { if (lastTic > 0) e.preventDefault(); });
 $('frame').addEventListener('dblclick', () => (document.fullscreenElement ? document.exitFullscreen() : $('frame').requestFullscreen()).catch(() => {}));
 
-const hires = params.get('hires') === '1';
+const res = parseRes(params.get('res'));
+const hires = !res && params.get('hires') === '1';
 const startPaused = params.get('paused') === '1';
-const other = new URLSearchParams(params);
-if (hires) other.delete('hires'); else other.set('hires', '1');
-$('detail').href = `?${other}`.replace(/\?$/, location.pathname);
-$('detail').textContent = hires ? 'low detail (160x100)' : 'high detail (320x200)';
-worker.postMessage({ type: 'start', wad: params.get('wad') || 'wad/e1m1.wad', hires, paused: startPaused });
+const current = res ? res.join('x') : hires ? '320x200' : '160x100';
+for (const size of ['160x100', '320x200', '640x480']) {
+  const q = new URLSearchParams(params);
+  q.delete('hires'); q.delete('res');
+  if (size !== '160x100') q.set('res', size);
+  const a = Object.assign(document.createElement('a'), { href: `?${q}`.replace(/\?$/, location.pathname), textContent: size });
+  if (size === current) a.className = 'current';
+  $('detail').append(a, ' ');
+}
+worker.postMessage({ type: 'start', wad: params.get('wad') || 'wad/e1m1.wad', hires, res, tier: params.get('tier'), paused: startPaused });

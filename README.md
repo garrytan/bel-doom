@@ -109,13 +109,15 @@ Everything is real Bel underneath: `(lit clo env parms body)` closures you can t
 
 ### Is it really Bel?
 
-Almost. The deliberate differences:
+Almost. The differences that matter:
 
 - **Numbers are IEEE doubles**, not unary rationals. Doom needs millions of multiplications a second, and unary multiplication of 320 by 200 builds a list of 64,000 `t`s.
 - **Continuations are escape-only** (enough for `catch`, `onerr` and early exits), and **threads are not supported**.
 - **Macro expansions are memoized per call site**, which assumes a macro's expansion depends only on its arguments. That is true of every macro in `bel.bel`.
 
-That's the whole list. Everything else, including the error behavior, parameter destructuring, optional and type-checked parameters and the way `set` finds places, is `bel.bel`'s own code or behaves identically to it.
+Smaller ones (the reader has no `#n=` labels, `chars` lists one-byte characters, `sys` needs a host hook) are in the [full list](docs/interpreter.md#differences-from-belbel). Everything else, including the error behavior, parameter destructuring, optional and type-checked parameters and the way `set` finds places, is `bel.bel`'s own code or behaves identically to it.
+
+You can check the speed tricks don't change the answers. `node test/jets-off.mjs` renders a frame with the native jets, then swaps 55 of them back to PG's own definitions in `bel.bel` (`map`, `append`, `nth`, `reduce` and the rest; only the number functions stay native) and renders the same world again. The two frames are identical, byte for byte; PG's definitions just take 12 seconds instead of 60 milliseconds.
 
 ## The 25 minutes
 
