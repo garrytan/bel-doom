@@ -1,0 +1,7 @@
+; High detail: Doom's full 320x200.  Load after main.bel and before doom-init.
+(set screen-w 320
+     screen-h 200
+     view-h   168
+     half-w   160
+     half-h   84
+     focal    160)

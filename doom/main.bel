@@ -1,30 +1,35 @@
 ; Doom in Bel.
 ;
 ; A WAD loader, BSP renderer and game loop for Freedoom's E1M1, written in
-; Paul Graham's Bel.  Entry points (see CONTRACT.md for the frame protocol):
+; Paul Graham's Bel.  Entry points (see docs/protocol.md for the frame protocol):
 ;
 ;   (doom-init "wad/e1m1.wad")  load the level, write the palette packet
-;   (doom-frame "wq")           run one tic with the given keys held, write a frame
+;   (doom-frame w "wq")         run one tic with the given keys held, write a frame
 ;
-; Bel has no arrays, so everything here is lists: the framebuffer is a list of
-; columns (the frame protocol is column-major, so a column is the natural unit),
-; textures are lists of columns, and the per-column clip state is three lists
-; we walk in lockstep with the framebuffer.
+; The engine is written functionally, in the style of bel.bel: no assignment,
+; no loops, just recursion and functions over lists.  The whole game is a
+; value, the world, threaded through pure functions:
+;
+;   (doom-init path)     reads the WAD and returns the world
+;   (doom-frame w keys)  returns the next world, writing its sounds and frame
+;   (step w keys)        the world one tic later
+;   (render w)           the frame: a list of columns of palette chars
+;
+; Only doom-init and doom-frame touch the outside world, reading the WAD and
+; writing packets.  Randomness comes from Doom's own table, indexed by a
+; number carried in the world.
 
 ;;;; Screen
 
-; Doom's low-detail 160x100 by default; (set-resolution 320 200) before
-; doom-init gives high detail.  The status bar takes the bottom 16%, as in
-; Doom, and the projection gives a 90 degree field of view.
-(def set-resolution (w h)
-  (set screen-w w
-       screen-h h
-       view-h   (- h (round (* h 0.16)))
-       half-w   (/ w 2)
-       half-h   (/ (- h (round (* h 0.16))) 2)
-       focal    (/ w 2)))
-
-(set-resolution 160 100)
+; Doom's low-detail 160x100.  For high detail, load doom/hires.bel before
+; doom-init.  The status bar takes the bottom 16%, as in Doom, and
+; the projection gives a 90 degree field of view.
+(set screen-w 160
+     screen-h 100
+     view-h   84
+     half-w   80
+     half-h   42
+     focal    80)
 
 (set near 1)              ; near clipping plane, in map units
 
@@ -43,29 +48,61 @@
 (load "doom/actors.bel")
 (load "doom/game.bel")
 
-;;;; Entry points
+;;;; The world
+
+(set hud-pictures
+     (append '(STBAR STARMS STYSNUM2 STGNUM3 STGNUM4 STGNUM5 STGNUM6 STGNUM7 STTPRCNT STFDEAD0)
+             digits
+             (apply append (map (fn (i) (map [sym (list \S \T \F \S \T (nchar (+ 48 i)) (nchar (+ 48 _)))]
+                                              '(0 1 2)))
+                                '(0 1 2 3 4)))))
+
+(def new-world (bytes)
+  (withs (lumps    (wad-lumps bytes)
+          palette  (first 768 (lump 'PLAYPAL lumps))
+          rgb      (palette-rgb palette)
+          cmaps    (colormap-chars (lump 'COLORMAP lumps))
+          textures (load-textures lumps)
+          level    (load-level lumps textures)
+          sprites  (map car (sprite-lumps lumps))
+          lv       (append (list (cons 'palette palette)
+                                 (cons 'colormaps cmaps)
+                                 (cons 'sky-tables (sky-tables (cdr (get 'SKY1 textures)) (car cmaps)))
+                                 (cons 'xangles (map [atan (/ (- half-w _ 0.5) focal)] (iota screen-w)))
+                                 (cons 'pictures (map [cons _ (picture (lump _ lumps))]
+                                                      (append sprites hud-pictures)))
+                                 (cons 'sprite-frames (sprite-frames sprites))
+                                 (cons 'pain-table (tint-table 255 0 0 0.25 rgb))
+                                 (cons 'bonus-table (tint-table 215 186 69 0.2 rgb)))
+                           level))
+    (update-hud
+      (reset-player
+        (list (cons 'lv lv) (cons 'tic 0) (cons 'rnd 0)
+              (cons 'heights (at 'heights level)) (cons 'movers nil)
+              (cons 'mobjs (spawn-things lv)) (cons 'next-id 10000)
+              (cons 'used nil) (cons 'sounds nil) (cons 'blasts nil) (cons 'hud nil))))))
+
+; For each sky texture column, its pixels down the view, which only depend
+; on the screen row.
+(def sky-tables (sky cm)
+  (let (w h cols . rest) sky
+    (map (fn (tc)
+           (map [nth (nth (+ 1 (mod (floor (+ 100 (* (/ 320 screen-w) (- _ half-h)))) h)) tc) cm]
+                (iota view-h)))
+         cols)))
+
+;;;; Entry points: the only side effects
 
 (def doom-init ((o path "wad/e1m1.wad"))
-  (load-wad path)
-  (load-palette)
-  (load-textures)
-  (load-sprites)
-  (load-level)
-  (build-grid)
-  (spawn-things)
-  (setup-screen)
-  (set start-x px start-y py start-angle pangle ticks 0 movers nil)
-  (reset-player)
-  (prc \P)
-  (each b palette (prc (nchar b)))
-  t)
+  (let w (new-world (read-bytes path))
+    (prc \P)
+    (pr (map nchar (at 'palette (at 'lv w))))
+    w))
 
-(def doom-frame ((o keys ""))
-  (set ticks (+ ticks 1))
-  (player-tic keys)
-  (run-movers)
-  (run-actors)
-  (render-frame)
-  (draw-hud)
-  (send-frame)
-  t)
+(def doom-frame (w (o keys ""))
+  (let w2 (step w keys)
+    (if (at 'sounds w2)
+        (pr (apply append (map [append "S" _ (list (nchar 10))] (rev (at 'sounds w2))))))
+    (prc \F)
+    (apply pr (render w2))
+    w2))

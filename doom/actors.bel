@@ -1,5 +1,8 @@
 ; Doom in Bel: things.  Monsters, items, decorations and effects are all
-; mobjs ("map objects"), made from a Bel template.
+; mobjs ("map objects"): property lists, replaced rather than changed.
+;
+; mobj keys: id x y z angle class args info sprite frames frame radius sec
+;            state tics hp solid shootable bright
 
 ;;;; Kinds
 
@@ -63,232 +66,248 @@
     (demon    150 5 180 \H "IJKLMN" (bite    1 4 10 "EFG")
               ("DSSGTSIT" "DSDMPAIN" "DSSGTDTH" "DSSGTATK"))))
 
-; Sound packet for the host: S, the sound lump name, newline.
-(def sfx (name)
-  (prc \S)
-  (each c name (prc c))
-  (prc (nchar 10)))
-
-(def monster-sfx (m i)
-  (sfx (nth i (nth 7 (m 'info)))))
-
-(tem mobj
-  x 0  y 0  z nil  angle 0  class nil  args nil  info nil
-  sprite nil  frames nil  frame nil  rots nil  bright nil
-  sec nil  state nil  tics 0  hp 0  radius 20  solid nil  shootable nil)
 
 ;;;; Spawning
 
-(def spawn-things ()
-  (set mobjs nil actors nil items nil solids nil)
-  (each (x y angle type flags)
-        (records 'THINGS 10
-          [list (s16 _) (s16 (drop 2 _)) (s16 (drop 4 _)) (u16 (drop 6 _)) (u16 (drop 8 _))])
-    (let k (get type kinds)
-      (when (and k (flag flags 2) (no (flag flags 16)))
-        (spawn k x y (/ (* angle pi) 180))))))
+(def spawn-things (lv)
+  (keep idfn
+        (map (fn ((x y angle type flags) i)
+               (let k (get type kinds)
+                 (if (and k (flag flags 2) (no (flag flags 16)))
+                     (new-mobj k i x y (/ (* angle pi) 180) (point-sector (at 'root lv) x y)))))
+             (at 'things lv)
+             (iota (len (at 'things lv))))))
 
-(def spawn (k x y angle)
-  (let (type sprite frames radius class . args) k
-    (let m (make mobj x x y y angle angle class class args args
-                      sprite (nom sprite) frames frames radius radius
-                      sec (point-sector x y))
-      (set-frame m (car frames))
-      (push m mobjs)
-      (aif (cdr (get class monster-classes))
-           (do (set (m 'info) it (m 'hp) (car it) (m 'state) 'idle
-                    (m 'solid) t (m 'shootable) t)
-               (push m actors)
-               (push m solids))
-           (= class 'barrel)
-           (do (set (m 'hp) 20 (m 'solid) t (m 'shootable) t)
-               (push m actors)
-               (push m solids))
-           (= class 'obstacle)
-           (do (set (m 'solid) t)
-               (push m solids))
-           (in class 'health 'armor 'ammo 'item)
-           (do (push m items)
-               (if (cdr frames) (push m actors)))
-           (cdr frames)
-           (push m actors))
-      m)))
+(def new-mobj (k id x y angle sec)
+  (withs ((type sprite frames radius class . args) k
+          info (cdr (get class monster-classes)))
+    (list (cons 'id id) (cons 'x x) (cons 'y y) (cons 'z nil) (cons 'angle angle)
+          (cons 'class class) (cons 'args args) (cons 'info info)
+          (cons 'sprite (nom sprite)) (cons 'frames frames)
+          (cons 'frame (if info (car frames)))
+          (cons 'radius radius) (cons 'sec sec)
+          (cons 'state (if info 'idle)) (cons 'tics 0)
+          (cons 'hp (if info (car info) (= class 'barrel) 20 0))
+          (cons 'solid (in class 'zombie 'sergeant 'imp 'demon 'barrel 'obstacle))
+          (cons 'shootable (in class 'zombie 'sergeant 'imp 'demon 'barrel))
+          (cons 'bright nil))))
 
 ; Puffs, blood and explosions: short animations that remove themselves.
-(def spawn-effect (sprite frames x y z)
-  (let m (make mobj x x y y z z class 'effect sprite sprite frames frames
-                    sec (point-sector x y) bright (= sprite "PUFF") state 'anim)
-    (set-frame m (car frames))
-    (push m mobjs)
-    (push m actors)))
+(def spawn-effect (w sprite frames x y z)
+  (puts w
+        'mobjs  (cons (list (cons 'id (at 'next-id w)) (cons 'x x) (cons 'y y) (cons 'z z)
+                            (cons 'angle 0) (cons 'class 'effect) (cons 'sprite sprite)
+                            (cons 'frames frames) (cons 'frame (car frames))
+                            (cons 'sec (point-sector (at 'root (at 'lv w)) x y))
+                            (cons 'state 'anim) (cons 'tics 0) (cons 'radius 0)
+                            (cons 'bright (= sprite "PUFF")))
+                      (at 'mobjs w))
+        'next-id (+ 1 (at 'next-id w))))
 
-(def set-frame (m c)
-  (unless (= (m 'frame) c)
-    (set (m 'frame) c
-         (m 'rots)  (cdr (get (sym (snoc (m 'sprite) c)) sprite-frames)))))
+(def sound (w name)
+  (puts w 'sounds (cons name (at 'sounds w))))
+
+(def monster-sound (w m i)
+  (sound w (nth i (nth 7 (at 'info m)))))
 
 (def enter (m state)
-  (set (m 'state) state (m 'tics) 0))
-
-(set reap nil)
-
-(def remove (m)
-  (set (m 'state) 'gone reap t))
+  (puts m 'state state 'tics 0))
 
 ;;;; Thinking
 
-(def run-actors ()
-  (set reap nil)
-  (each m actors (think m))
-  (when reap
-    (set mobjs  (keep [no (= (_ 'state) 'gone)] mobjs)
-         actors (keep [no (= (_ 'state) 'gone)] actors)
-         items  (keep [no (= (_ 'state) 'gone)] items))))
+; Every monster and animation thinks once a tic.  A thinker takes the world
+; and a mobj and returns (world . mobj), with no mobj when it is gone; the
+; world carries the random index, sounds, blasts and the player's health.
+(def run-actors (w)
+  (let (w2 . ms) (foldl (fn (m (w . acc))
+                          (if (or (at 'info m) (in (at 'state m) 'anim 'die))
+                              (let (w3 . m2) (think w m)
+                                (cons w3 (if m2 (cons m2 acc) acc)))
+                              (cons w (cons m acc))))
+                        (cons w nil)
+                        (at 'mobjs w))
+    (run-blasts (puts w2 'mobjs (rev ms)))))
 
-(def think (m)
-  (set (m 'tics) (+ (m 'tics) 1))
-  (if (m 'info)
-      (think-monster m (m 'info))
-      (in (m 'state) 'anim 'die)
-      (let i (floor (/ (m 'tics) 3))
-        (if (< i (len (m 'frames)))
-            (set-frame m (nth (+ i 1) (m 'frames)))
-            (remove m)))
-      (set-frame m (nth (+ 1 (mod (floor (/ ticks 4)) (len (m 'frames)))) (m 'frames)))))
+(def think (w m)
+  (if (at 'info m)
+      (think-monster w (puts m 'tics (+ 1 (at 'tics m))) (at 'info m))
+      (withs (tics (+ 1 (at 'tics m))
+              i    (floor (/ tics 3)))
+        (if (< i (len (at 'frames m)))
+            (cons w (puts m 'tics tics 'frame (nth (+ i 1) (at 'frames m))))
+            (cons w nil)))))
 
-(def think-monster (m info)
+(def think-monster (w m info)
   (let (hp speed pain-chance pain-frame death-frames attack sounds) info
-    (case (m 'state)
-      idle   (do (set-frame m (if (< (mod ticks 16) 8) \A \B))
-                 (when (and (= (mod ticks 4) (mod (m 'x) 4)) (sees-player m))
-                   (monster-sfx m 1)
-                   (enter m 'chase)))
-      chase  (chase m speed attack)
-      attack (attack-step m attack)
-      pain   (if (> (m 'tics) 3) (enter m 'chase))
-      die    (let i (floor (/ (m 'tics) 4))
-               (if (< i (len death-frames))
-                   (set-frame m (nth (+ i 1) death-frames))
-                   (enter m 'dead))))))
+    (case (at 'state m)
+      idle   (let m (puts m 'frame (if (< (mod (at 'tic w) 16) 8) \A \B))
+               (if (and (= (mod (at 'tic w) 4) (mod (at 'x m) 4)) (facing-player w m) (sees-player w m))
+                   (cons (monster-sound w m 1) (enter m 'chase))
+                   (cons w m)))
+      chase  (chase w m speed attack)
+      attack (attack-step w m attack)
+      pain   (cons w (if (> (at 'tics m) 3) (enter m 'chase) m))
+      die    (let i (floor (/ (at 'tics m) 4))
+               (cons w (if (< i (len death-frames))
+                           (puts m 'frame (nth (+ i 1) death-frames))
+                           (enter m 'dead))))
+             (cons w m))))
 
-; A monster can only see the player from a sector we drew last frame (sight
-; is symmetric), within range, with no wall in between.
-(def sees-player (m)
-  (and (> health 0)
-       (= (car (nth 9 (m 'sec))) frame-count)
-       (< (abs (- (m 'x) px)) 1500)
-       (< (abs (- (m 'y) py)) 1500)
-       (clear-line (m 'x) (m 'y) px py)))
+; Sight: in range, with no wall in between.
+(def sees-player (w m)
+  (and (> (at 'health w) 0)
+       (< (abs (- (at 'x m) (at 'px w))) 1500)
+       (< (abs (- (at 'y m) (at 'py w))) 1500)
+       (clear-line (at 'grid (at 'lv w)) (at 'heights w) (at 'x m) (at 'y m) (at 'px w) (at 'py w))))
 
-(def face-player (m)
-  (set (m 'angle) (atan2 (- py (m 'y)) (- px (m 'x)))))
+; Like Doom's monsters, a sleeping one only notices us in front of it,
+; unless we are close.
+(def facing-player (w m)
+  (with (dx (- (at 'px w) (at 'x m)) dy (- (at 'py w) (at 'y m)))
+    (or (> (+ (* dx (cos (at 'angle m))) (* dy (sin (at 'angle m)))) 0)
+        (< (+ (* dx dx) (* dy dy)) 4096))))
 
-(def chase (m speed attack)
-  (set-frame m (nth (+ 1 (mod (floor (/ (m 'tics) 4)) 4)) "ABCD"))
-  (let d (dist (m 'x) (m 'y) px py)
-    (if (and (> health 0)
-             (if (= (car attack) 'bite)
-                 (< d (+ (m 'radius) 60))
-                 (< (random 1000) 25))
-             (sees-player m))
-        (do (enter m 'attack) (face-player m))
-        (> d (+ (m 'radius) player-radius 8))
-        (let a (atan2 (- py (m 'y)) (- px (m 'x)))
-          (or (step-toward m a speed)
-              (step-toward m (+ a 0.8) speed)
-              (step-toward m (- a 0.8) speed)
-              (step-toward m (+ a 1.6) speed)
-              (step-toward m (- a 1.6) speed))))))
+(def angle-to-player (w m)
+  (atan2 (- (at 'py w) (at 'y m)) (- (at 'px w) (at 'x m))))
 
-(def step-toward (m a speed)
-  (withs (x   (+ (m 'x) (* speed (cos a)))
-          y   (+ (m 'y) (* speed (sin a)))
-          sec (point-sector x y))
-    (when (and (<= (abs (- (car sec) (car (m 'sec)))) max-step)
-               (>= (- (cadr sec) (car sec)) 56)
-               (no (wall-near x y (m 'radius) (car (m 'sec))))
-               (> (dist x y px py) (+ (m 'radius) player-radius)))
-      (set (m 'x) x (m 'y) y (m 'angle) a (m 'sec) sec)
-      t)))
+(def chase (w m speed attack)
+  (withs (m    (puts m 'frame (nth (+ 1 (mod (floor (/ (at 'tics m) 4)) 4)) "ABCD"))
+          d    (dist (at 'x m) (at 'y m) (at 'px w) (at 'py w))
+          r    (random w)
+          w    (spin w))
+    (if (and (> (at 'health w) 0)
+             (if (= (car attack) 'bite) (< d (+ (at 'radius m) 60)) (< r 7))
+             (sees-player w m))
+        (cons w (puts (enter m 'attack) 'angle (angle-to-player w m)))
+        (> d (+ (at 'radius m) player-radius 8))
+        (let a (angle-to-player w m)
+          (cons w (or (step-toward w m a speed)
+                      (step-toward w m (+ a 0.8) speed)
+                      (step-toward w m (- a 0.8) speed)
+                      (step-toward w m (+ a 1.6) speed)
+                      (step-toward w m (- a 1.6) speed)
+                      m)))
+        (cons w m))))
+
+(def step-toward (w m a speed)
+  (withs (lv      (at 'lv w)
+          heights (at 'heights w)
+          x       (+ (at 'x m) (* speed (cos a)))
+          y       (+ (at 'y m) (* speed (sin a)))
+          sec     (point-sector (at 'root lv) x y)
+          (ff fc) (nth (+ sec 1) heights)
+          here    (car (nth (+ (at 'sec m) 1) heights)))
+    (if (and (<= (abs (- ff here)) max-step)
+             (>= (- fc ff) 56)
+             (no (wall-near lv heights x y (at 'radius m) here))
+             (> (dist x y (at 'px w) (at 'py w)) (+ (at 'radius m) player-radius)))
+        (puts m 'x x 'y y 'angle a 'sec sec))))
 
 ; Is there a wall within r of (x, y) that something standing at height floor
 ; cannot pass?
-(def wall-near (x y r floor)
-  (some (fn (ln)
-          (let (x1 y1 x2 y2 front back blocking minx maxx miny maxy len2 . rest) ln
-            (and (or blocking
-                     (let (ff fc . frest) front
-                       (let (bf bc . brest) back
-                         (or (> (- (max ff bf) floor) max-step)
-                             (< (- (min fc bc) (max ff bf)) 56)))))
-                 (withs (dx (- x2 x1)
-                         dy (- y2 y1)
-                         f  (clamp (/ (+ (* (- x x1) dx) (* (- y y1) dy)) len2) 0 1)
-                         cx (+ x1 (* f dx))
-                         cy (+ y1 (* f dy)))
-                   (< (+ (* (- x cx) (- x cx)) (* (- y cy) (- y cy))) (* r r))))))
-        (lines-near x y)))
+(def wall-near (lv heights x y r floor)
+  (some [let (x1 y1 x2 y2 front back blocking minx maxx miny maxy len2 . rest) _
+          (and (or blocking (opening-blocks heights front back floor))
+               (withs (dx (- x2 x1)
+                       dy (- y2 y1)
+                       f  (clamp (/ (+ (* (- x x1) dx) (* (- y y1) dy)) len2) 0 1)
+                       cx (+ x1 (* f dx))
+                       cy (+ y1 (* f dy)))
+                 (< (+ (* (- x cx) (- x cx)) (* (- y cy) (- y cy))) (* r r))))]
+        (lines-near (at 'grid lv) x y)))
 
-(def attack-step (m attack)
-  (let frames (nth 5 attack)
-    (let i (floor (/ (- (m 'tics) 1) 4))
-      (if (< i (len frames))
-          (do (set-frame m (nth (+ i 1) frames))
-              (if (= (m 'tics) (+ 1 (* 4 (- (len frames) 1))))
-                  (monster-fire m attack)))
-          (enter m 'chase)))))
+; Too high a step up, or too little headroom, between two sectors.
+(def opening-blocks (heights front back floor)
+  (let ((ff fc) (bf bc)) (list (nth (+ front 1) heights) (nth (+ back 1) heights))
+    (or (> (- (max ff bf) floor) max-step)
+        (< (- (min fc bc) (max ff bf)) 56))))
 
-(def monster-fire (m attack)
-  (let (kind shots unit dice frames) attack
-    (face-player m)
-    (monster-sfx m 4)
-    (when (sees-player m)
-      (let d (dist (m 'x) (m 'y) px py)
-        (if (= kind 'bite)
-            (if (< d (+ (m 'radius) 70))
-                (hurt-player (* unit (+ 1 (random dice)))))
-            (repeat shots
-              (if (< (random 1000) (- 900 (/ d 3)))
-                  (hurt-player (* unit (+ 1 (random dice)))))))))))
+(def attack-step (w m attack)
+  (withs (frames (nth 5 attack)
+          i      (floor (/ (- (at 'tics m) 1) 4)))
+    (if (< i (len frames))
+        (let m (puts m 'frame (nth (+ i 1) frames))
+          (if (= (at 'tics m) (+ 1 (* 4 (- (len frames) 1))))
+              (monster-fire w m attack)
+              (cons w m)))
+        (cons w (enter m 'chase)))))
+
+(def monster-fire (w m attack)
+  (withs ((kind shots unit dice frames) attack
+          m (puts m 'angle (angle-to-player w m))
+          w (monster-sound w m 4)
+          d (dist (at 'x m) (at 'y m) (at 'px w) (at 'py w)))
+    (cons (if (no (sees-player w m))
+              w
+              (= kind 'bite)
+              (if (< d (+ (at 'radius m) 70))
+                  (spin (hurt-player w (* unit (+ 1 (mod (random w) dice)))))
+                  w)
+              (volley w shots d unit dice))
+          m)))
+
+; Each shot hits less often the further away we are.
+(def volley (w shots d unit dice)
+  (if (> shots 0)
+      (withs (hit (< (* 4 (random w)) (- 900 (/ d 3)))
+              w   (spin w)
+              w   (if hit (spin (hurt-player w (* unit (+ 1 (mod (random w) dice))))) w))
+        (volley w (- shots 1) d unit dice))
+      w))
 
 ;;;; Damage
 
-(def damage (m n)
-  (set (m 'hp) (- (m 'hp) n))
-  (if (<= (m 'hp) 0)
-      (kill m)
-      (m 'info)
-      (if (< (random 256) (caddr (m 'info)))
-          (do (enter m 'pain)
-              (set-frame m (nth 4 (m 'info)))
-              (monster-sfx m 2))
-          (= (m 'state) 'idle)
-          (enter m 'chase))))
+(def damage (w m n)
+  (let m (puts m 'hp (- (at 'hp m) n))
+    (if (<= (at 'hp m) 0)
+        (kill w m)
+        (at 'info m)
+        (withs (r (random w) w (spin w))
+          (if (< r (caddr (at 'info m)))
+              (cons (monster-sound w m 2) (puts (enter m 'pain) 'frame (nth 4 (at 'info m))))
+              (= (at 'state m) 'idle)
+              (cons w (enter m 'chase))
+              (cons w m)))
+        (cons w m))))
 
-(def kill (m)
-  (set (m 'solid) nil (m 'shootable) nil)
-  (enter m 'die)
-  (if (m 'info)
-      (monster-sfx m 3)
-      (sfx "DSBAREXP"))
-  (unless (m 'info)
-    (set (m 'sprite) "BEXP" (m 'frames) "ABCDE" (m 'bright) t (m 'frame) nil)
-    (set-frame m \A)
-    (explode m)))
+(def kill (w m)
+  (let m (enter (puts m 'solid nil 'shootable nil) 'die)
+    (if (at 'info m)
+        (cons (monster-sound w m 3) m)
+        (cons (puts (sound w "DSBAREXP") 'blasts (cons (list (at 'x m) (at 'y m)) (at 'blasts w)))
+              (puts m 'sprite "BEXP" 'frames "ABCDE" 'bright t 'frame \A 'state 'die)))))
+
+; Damage the mobj with this id.
+(def damage-id (w id n)
+  (let (w2 . ms) (foldl (fn (m (w . acc))
+                          (if (= (at 'id m) id)
+                              (let (w3 . m2) (damage w m n) (cons w3 (cons m2 acc)))
+                              (cons w (cons m acc))))
+                        (cons w nil)
+                        (at 'mobjs w))
+    (puts w2 'mobjs (rev ms))))
 
 ; A barrel blast hurts everything within 128 units, the player included.
-(def explode (m)
-  (each a actors
-    (when (a 'shootable)
-      (let d (dist (m 'x) (m 'y) (a 'x) (a 'y))
-        (if (< d 128) (damage a (floor (- 128 d)))))))
-  (let d (dist (m 'x) (m 'y) px py)
-    (if (< d 128) (hurt-player (floor (- 128 d))))))
+; Barrels it sets off blast on the next tic.
+(def run-blasts (w)
+  (foldl (fn ((bx by) w)
+           (withs (d  (dist bx by (at 'px w) (at 'py w))
+                   w  (if (< d 128) (hurt-player w (floor (- 128 d))) w))
+             (foldl (fn (m w)
+                      (if (at 'shootable m)
+                          (let d (dist bx by (at 'x m) (at 'y m))
+                            (if (< d 128) (damage-id w (at 'id m) (floor (- 128 d))) w))
+                          w))
+                    w
+                    (at 'mobjs w))))
+         (puts w 'blasts nil)
+         (at 'blasts w)))
 
 ; Firing makes noise: idle monsters nearby wake up.
-(def make-noise ()
-  (each m actors
-    (if (and (= (m 'state) 'idle)
-             (< (abs (- (m 'x) px)) 1000)
-             (< (abs (- (m 'y) py)) 1000))
-        (enter m 'chase))))
+(def make-noise (w)
+  (puts w 'mobjs (map [if (and (= (at 'state _) 'idle)
+                               (< (abs (- (at 'x _) (at 'px w))) 1000)
+                               (< (abs (- (at 'y _) (at 'py w))) 1000))
+                          (enter _ 'chase)
+                          _]
+                      (at 'mobjs w))))

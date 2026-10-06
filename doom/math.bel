@@ -1,6 +1,5 @@
-; Doom in Bel: math.
-
-;;;; Math: Bel has no trig or square roots, so we grow our own.
+; Doom in Bel: math.  Bel has no trig or square roots, so we grow our own,
+; by recursion in the style of bel.bel.
 
 (set pi 3.141592653589793)
 
@@ -9,14 +8,16 @@
       (> x hi) hi
                x))
 
+; sin by its Taylor series around 0, after folding a into [-pi, pi).
 (def sin (a)
   (let x (- a (* 2 pi (floor (/ (+ a pi) (* 2 pi)))))
-    (with (term x sum x k 1)
-      (while (< k 21)
-        (set term (/ (* term x x -1) (* (+ k 1) (+ k 2)))
-             sum  (+ sum term)
-             k    (+ k 2)))
-      sum)))
+    (sin-series x x x 1)))
+
+(def sin-series (x term sum k)
+  (if (< k 21)
+      (let next (/ (* term x x -1) (* (+ k 1) (+ k 2)))
+        (sin-series x next (+ sum next) (+ k 2)))
+      sum))
 
 (def cos (a)
   (sin (+ a (/ pi 2))))
@@ -24,21 +25,24 @@
 ; Newton's method from above: every guess stays >= the root, so stop when
 ; the guess and x/guess agree.
 (def sqrt (x)
-  (if (<= x 0)
-      0
-      (let g (max x 1)
-        (while (> (- g (/ x g)) (* g 0.000000000001))
-          (set g (/ (+ g (/ x g)) 2)))
-        g)))
+  (if (<= x 0) 0 (newton x (max x 1))))
 
+(def newton (x g)
+  (if (> (- g (/ x g)) (* g 0.000000000001))
+      (newton x (/ (+ g (/ x g)) 2))
+      g))
+
+; atan(v) = 2 atan(u) with u = v / (1 + sqrt(1 + v^2)) small enough for
+; the series u - u^3/3 + u^5/5 ...
 (def atan (v)
   (let u (/ v (+ 1 (sqrt (+ 1 (* v v)))))
-    (with (p u sum u k 1 u2 (* u u))
-      (while (< k 41)
-        (set k   (+ k 2)
-             p   (* p u2 -1)
-             sum (+ sum (/ p k))))
-      (* 2 sum))))
+    (* 2 (atan-series (* u u) u u 1))))
+
+(def atan-series (u2 p sum k)
+  (if (< k 41)
+      (let p (* p u2 -1)
+        (atan-series u2 p (+ sum (/ p (+ k 2))) (+ k 2)))
+      sum))
 
 (def atan2 (y x)
   (if (> (abs x) (abs y))
@@ -53,18 +57,53 @@
 (def dist (x1 y1 x2 y2)
   (sqrt (+ (* (- x2 x1) (- x2 x1)) (* (- y2 y1) (- y2 y1)))))
 
-; Park-Miller minimal standard generator: exact in doubles.
-(set seed 1)
+; (iota 3) is (0 1 2).
+(def iota (n (o acc))
+  (if (> n 0) (iota (- n 1) (cons (- n 1) acc)) acc))
 
-(def random (n)
-  (set seed (mod (* seed 16807) 2147483647))
-  (mod seed n))
+; (fill 3 'a) is (a a a), built by doubling.
+(def fill (n x)
+  (if (< n 1) nil
+      (= n 1) (list x)
+      (let half (fill (floor (/ n 2)) x)
+        (append half half (if (odd n) (list x))))))
 
-(def iota (n)
-  (let xs nil
-    (for i 1 n (set xs (cons (- n i) xs)))
-    xs))
+; (steps 3 x dx) is (x x+dx x+2dx), each by adding dx to the last.
+(def steps (n x dx (o acc))
+  (if (> n 0) (steps (- n 1) (+ x dx) dx (cons x acc)) (rev acc)))
 
 (def flag (flags bit)
   (odd (floor (/ flags bit))))
 
+; Property lists: (at 'k xs) looks k up, (puts xs 'k v ...) is xs with new
+; values for the keys.
+(def at (k xs)
+  (cdr (get k xs)))
+
+(def puts (xs . kvs)
+  (if kvs
+      (apply puts (put (car kvs) (cadr kvs) xs) (cddr kvs))
+      xs))
+
+; Doom's own random numbers: a fixed table and an index, like P_Random.
+; The index lives in the world as rnd.
+(set rndtable '(
+   0 8 109 220 222 241 149 107 75 248 254 140 16 66 74 21 211 47 80 242 
+   154 27 205 128 161 89 77 36 95 110 85 48 212 140 211 249 22 79 200 50 
+   28 188 52 140 202 120 68 145 62 70 184 190 91 197 152 224 149 104 25 
+   178 252 182 202 182 141 197 4 81 181 242 145 42 39 227 156 198 225 193 
+   219 93 122 175 249 0 175 143 70 239 46 246 163 53 163 109 168 135 2 235 
+   25 92 20 145 138 77 69 166 78 176 173 212 166 113 94 161 41 50 239 49 
+   111 164 70 60 2 37 171 75 136 156 11 56 42 146 138 229 73 146 77 61 98 
+   196 135 106 63 197 195 86 96 203 113 101 170 247 181 113 80 250 108 7 
+   255 237 129 226 79 107 112 166 103 241 24 223 239 120 198 58 60 82 128 
+   3 184 66 143 224 145 224 81 206 163 45 63 90 168 114 59 33 159 95 28 
+   139 123 98 125 196 15 70 194 253 54 14 109 226 71 17 161 93 186 87 244 
+   138 20 52 123 251 26 36 17 46 52 231 232 76 31 221 84 37 216 165 212 
+   106 197 242 98 43 39 175 254 145 190 84 118 222 187 136 120 163 236 249))
+
+(def random (w)
+  (nth (+ 1 (mod (+ 1 (at 'rnd w)) 256)) rndtable))
+
+(def spin (w)
+  (puts w 'rnd (mod (+ 1 (at 'rnd w)) 256)))

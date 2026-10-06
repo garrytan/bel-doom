@@ -1,14 +1,19 @@
-; Doom in Bel: WAD files, palette, flats, patches and textures.
+; Doom in Bel: WAD files, palette, light, flats, patches, textures and
+; sprites.  Everything is read once by doom-init into immutable lists.
 
 ;;;; WAD files
 
+; Reading the file is the one place we touch a stream: a tail-recursive
+; loop over rdc.
 (def read-bytes (path)
   (let s (ops path 'in)
-    (let bs nil
-      (whilet c (rdc s)
-        (set bs (cons (charn c) bs)))
+    (let bs (read-rest s nil)
       (cls s)
-      (rev bs))))
+      bs)))
+
+(def read-rest (s acc)
+  (let c (rdc s)
+    (if c (read-rest s (cons (charn c) acc)) (rev acc))))
 
 (def u16 (bs) (+ (car bs) (* 256 (cadr bs))))
 
@@ -21,178 +26,145 @@
 (def lump-name (bs)
   (sym (map nchar (keep [> _ 0] (first 8 bs)))))
 
-; Each lump gets its own list of bytes, cut from the file in one pass, so
-; parsing a lump never walks the rest of the file.
-(def load-wad (path)
-  (let bs (read-bytes path)
-    (with (dir (drop (s32 (drop 8 bs)) bs) pos 0 cur bs)
-      (set lumps
-           (accum a
-             (repeat (s32 (drop 4 bs))
-               (with (off (s32 dir) size (s32 (drop 4 dir)))
-                 (if (< off pos) (set pos 0 cur bs))
-                 (set cur (drop (- off pos) cur) pos off)
-                 (a (list (lump-name (drop 8 dir)) (first size cur) size)))
-               (set dir (drop 16 dir))))))))
+; The directory as a list of (name bytes size), each lump's bytes cut from
+; the file in one pass so parsing a lump never walks the rest of the file.
+(def wad-lumps (bs)
+  (cut-lumps bs (s32 (drop 4 bs)) (drop (s32 (drop 8 bs)) bs) bs 0 nil))
 
-(def lump (name)
+(def cut-lumps (bs n dir cur pos acc)
+  (if (= n 0)
+      (rev acc)
+      (withs (off  (s32 dir)
+              size (s32 (drop 4 dir))
+              here (if (< off pos) (drop off bs) (drop (- off pos) cur)))
+        (cut-lumps bs (- n 1) (drop 16 dir) here off
+                   (cons (list (lump-name (drop 8 dir)) (first size here) size) acc)))))
+
+(def lump (name lumps)
   (cadr (get name lumps)))
 
-(def lump-size (name)
-  (caddr (get name lumps)))
+; The fixed-size records of a lump, each parsed by f.
+(def records (name size f lumps)
+  (let l (get name lumps)
+    (map f (chunks (cadr l) size (/ (caddr l) size) nil))))
 
-(def records (name size f)
-  (let bs (lump name)
-    (accum a
-      (repeat (/ (lump-size name) size)
-        (a (f bs))
-        (set bs (drop size bs))))))
+(def chunks (bs size n acc)
+  (if (> n 0)
+      (chunks (drop size bs) size (- n 1) (cons bs acc))
+      (rev acc)))
 
-;;;; Palette, light and flats
+;;;; Palette and light
 
-(def load-palette ()
-  (set palette (first 768 (lump 'PLAYPAL))
-       rgb (let bs palette
-             (accum a
-               (repeat 256
-                 (a (list (car bs) (cadr bs) (caddr bs)))
-                 (set bs (drop 3 bs)))))
-       colormaps (let bs (lump 'COLORMAP)
-                   (accum a
-                     (repeat 32
-                       (a (map nchar (first 256 bs)))
-                       (set bs (drop 256 bs)))))
-       flat-cache nil))
+(def palette-rgb (pal)
+  (map [first 3 _] (chunks pal 3 256 nil)))
 
-(def nearest-color (r g b)
-  (with (best 0 bestd 1000000 i 0)
-    (each (cr cg cb) rgb
-      (let d (+ (* (- r cr) (- r cr)) (* (- g cg) (- g cg)) (* (- b cb) (- b cb)))
-        (if (< d bestd) (set best i bestd d)))
-      (set i (+ i 1)))
-    best))
+(def colormap-chars (bs)
+  (map [map nchar (first 256 (drop (* 256 _) bs))] (iota 32)))
 
-; A flat is 64 rows of 64 1-based palette indices, read on first use.
-(def flat (name)
-  (or (cdr (get name flat-cache))
-      (let bs (lump name)
-        (let rows (map (fn (r) (let row (first 64 bs) (set bs (drop 64 bs)) (map inc row)))
-                       (iota 64))
-          (set flat-cache (cons (cons name rows) flat-cache))
-          rows))))
+(def nearest-color (r g b rgb)
+  (cadr (foldl (fn ((cr cg cb) (i best bestd))
+                 (let d (+ (* (- r cr) (- r cr)) (* (- g cg) (- g cg)) (* (- b cb) (- b cb)))
+                   (if (< d bestd)
+                       (list (+ i 1) i d)
+                       (list (+ i 1) best bestd))))
+               (list 0 0 1000000)
+               rgb)))
 
 (def light-start (light)
   (* 4 (- 15 (clamp (floor (/ light 16)) 0 15))))
+
+; A flat is 64 rows of 64 1-based palette indices.
+(def flat (name lumps)
+  (let bs (lump name lumps)
+    (map [map inc (first 64 (drop (* 64 _) bs))] (iota 64))))
 
 ;;;; Patches and textures
 
 ; A patch is a list of columns of 1-based palette indices, 0 = transparent.
 (def patch-raster (pb)
-  (with (w (u16 pb) h (u16 (cddr pb)))
-    (map (fn (px)
-           (let col (map [do 0] (iota h))
-             (let p (drop (s32 (drop (+ 8 (* 4 px)) pb)) pb)
-               (while (< (car p) 255)
-                 (with (cell (drop (car p) col) d (drop 3 p))
-                   (repeat (cadr p)
-                     (if cell (xar cell (+ 1 (car d))))
-                     (set cell (cdr cell) d (cdr d))))
-                 (set p (drop (+ (cadr p) 4) p))))
-             col))
-         (iota w))))
+  (let h (u16 (cddr pb))
+    (map [paint-posts (drop (s32 (drop (+ 8 (* 4 _)) pb)) pb) (fill h 0) h]
+         (iota (u16 pb)))))
 
-; Texture: (width height columns patches masked-columns).  Columns are composited from the
-; patches the first time a texture is drawn, and each column is a circular
-; list so vertical tiling is just walking further.
-(def load-textures ()
-  (with (pb (lump 'PNAMES) tb (lump 'TEXTURE1))
-    (let patches (map [lump (lump-name (drop (+ 4 (* 8 _)) pb))]
+; Each post is (top-delta length pad pixels... pad), ended by 255.
+(def paint-posts (p col h)
+  (if (or (no p) (= (car p) 255))
+      col
+      (withs (top (car p)
+              n   (cadr p)
+              k   (max 0 (min n (- h top))))
+        (paint-posts (drop (+ n 4) p)
+                     (append (first top col) (map inc (first k (drop 3 p))) (drop (+ top k) col))
+                     h))))
+
+; A patch column moved down to start at row y of an h-row texture column.
+(def placed (pcol y h)
+  (first h (append (if (< y 0) (drop (- y) pcol) (fill y 0)) (if (< y 0) nil pcol) (fill h 0))))
+
+; Lay one patch column over a texture column, starting at row y.
+(def overlay (col pcol y)
+  (map (fn (old new) (if (> new 0) new old)) col (placed pcol y (len col))))
+
+; Texture: (width height columns masked-columns).  The masked columns keep
+; 0 where no patch covers, for see-through middles; walls show black there.
+(def load-textures (lumps)
+  (with (pb (lump 'PNAMES lumps) tb (lump 'TEXTURE1 lumps))
+    (let rasters (map [patch-raster (lump (lump-name (drop (+ 4 (* 8 _)) pb)) lumps)]
                       (iota (s32 pb)))
-      (set textures
-           (map (fn (i)
-                  (let b (drop (s32 (drop (+ 4 (* 4 i)) tb)) tb)
-                    (list (lump-name b)
-                          (s16 (drop 12 b))
-                          (s16 (drop 14 b))
-                          nil
-                          (map (fn (j)
-                                 (let p (drop (+ 22 (* 10 j)) b)
-                                   (list (s16 p) (s16 (cddr p))
-                                         (nth (+ 1 (u16 (drop 4 p))) patches))))
-                               (iota (s16 (drop 20 b))))
-                          nil)))
-                (iota (s32 tb)))))))
+      (map [texture (drop (s32 (drop (+ 4 (* 4 _)) tb)) tb) rasters]
+           (iota (s32 tb))))))
 
-(def texture (name)
-  (cdr (get name textures)))
-
-; Paint the patches into columns that start out as fill: 1 (black) for
-; walls, 0 (transparent) for the see-through middles of two-sided lines.
-(def paint-patches (tex fill)
-  (let (w h cols patches . rest) tex
-    (let cs (map (fn (x) (map [do fill] (iota h))) (iota w))
-      (each (ox oy pb) patches
-        (let x ox
-          (each pcol (patch-raster pb)
-            (when (and (>= x 0) (< x w))
-              (with (col (nth (+ x 1) cs) y oy)
-                (each v pcol
-                  (if (and (> v 0) (>= y 0) (< y h))
-                      (xar (drop y col) v))
-                  (set y (+ y 1)))))
-            (set x (+ x 1)))))
-      cs)))
-
-(def composite (tex)
-  (let cs (paint-patches tex 1)
-    (each c cs (xdr (lastcdr c) c))
-    (xar (cddr tex) cs)
-    cs))
-
-(def masked-cols (tex)
-  (or (nth 5 tex)
-      (let cs (paint-patches tex 0)
-        (xar (drop 4 tex) cs)
-        cs)))
-
-(def texture-cols (tex)
-  (or (caddr tex) (composite tex)))
+; Most texture columns lie under a single patch and are just that patch's
+; column, moved; only where patches overlap do we merge texel by texel.
+(def texture (b rasters)
+  (withs (w       (s16 (drop 12 b))
+          h       (s16 (drop 14 b))
+          patches (map [let p (drop (+ 22 (* 10 _)) b)
+                         (list (s16 p) (s16 (cddr p)) (nth (+ 1 (u16 (drop 4 p))) rasters))]
+                       (iota (s16 (drop 20 b))))
+          masked  (map (fn (x)
+                         (let over (keep [let (ox oy raster) _
+                                           (and (>= x ox) (< x (+ ox (len raster))))]
+                                         patches)
+                           (if (no over)
+                               (fill h 0)
+                               (no (cdr over))
+                               (let (ox oy raster) (car over)
+                                 (placed (nth (+ 1 (- x ox)) raster) oy h))
+                               (foldl (fn ((ox oy raster) col)
+                                        (overlay col (nth (+ 1 (- x ox)) raster) oy))
+                                      (fill h 0)
+                                      over))))
+                       (iota w)))
+    (list (lump-name b) w h (map [if (mem 0 _) (map [max _ 1] _) _] masked) masked)))
 
 ;;;; Pictures and sprites
 
-; A picture is (width height left-offset top-offset columns), the columns
-; from patch-raster.  Pictures are rasterized the first time they are drawn.
-(set picture-cache nil)
+; A picture is (width height left-offset top-offset columns).
+(def picture (pb)
+  (list (u16 pb) (u16 (cddr pb)) (s16 (drop 4 pb)) (s16 (drop 6 pb)) (patch-raster pb)))
 
-(def picture (name)
-  (or (cdr (get name picture-cache))
-      (let pb (lump name)
-        (let pic (list (u16 pb) (u16 (cddr pb)) (s16 (drop 4 pb)) (s16 (drop 6 pb))
-                       (patch-raster pb))
-          (push (cons name pic) picture-cache)
-          pic))))
+(def sprite-lumps (lumps)
+  (let ls (drop (pos 'S_START (map car lumps)) lumps)
+    (first (- (pos 'S_END (map car ls)) 1) ls)))
 
 ; Sprite lumps are named like TROOA1 or TROOA2A8: four letters of sprite, a
 ; frame letter and a rotation (0 means it looks the same from every side),
 ; then optionally a second frame and rotation that use the picture mirrored.
-; sprite-frames maps a sprite frame like TROOA to its eight rotations, each
+; The result maps a sprite frame like TROOA to its eight rotations, each
 ; (lump . flipped).
-(def load-sprites ()
-  (set sprite-frames nil)
-  (let ls (drop (pos 'S_START (map car lumps)) lumps)
-    (each (name . rest) (first (- (pos 'S_END (map car ls)) 1) ls)
-      (let cs (nom name)
-        (add-rotation (sym (first 5 cs)) (nth 6 cs) name nil)
-        (if (> (len cs) 6)
-            (add-rotation (sym (snoc (first 4 cs) (nth 7 cs))) (nth 8 cs) name t))))))
+(def sprite-frames (names)
+  (let views (apply append (map sprite-views names))
+    (map (fn (key)
+           (cons key (map (fn (r)
+                            (let v (find [and (id (car _) key) (in (cadr _) 0 r)] views)
+                              (if v (cddr v))))
+                          '(1 2 3 4 5 6 7 8))))
+         (dedup (map car views)))))
 
-(def add-rotation (key rot name flip)
-  (with (rots (or (cdr (get key sprite-frames))
-                  (let r (map [do nil] (iota 8))
-                    (push (cons key r) sprite-frames)
-                    r))
-         entry (cons name flip))
-    (if (= rot \0)
-        (let p rots
-          (while p (xar p entry) (set p (cdr p))))
-        (xar (drop (- (charn rot) 49) rots) entry))))
+(def sprite-views (name)
+  (let cs (nom name)
+    (cons (list (sym (first 5 cs)) (- (charn (nth 6 cs)) 48) name)
+          (if (> (len cs) 6)
+              (list (cons (sym (snoc (first 4 cs) (nth 7 cs)))
+                          (cons (- (charn (nth 8 cs)) 48) (cons name t))))))))

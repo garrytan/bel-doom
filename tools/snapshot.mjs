@@ -5,8 +5,11 @@
 //
 // --keys sets the held keys for the following --tics tics, and can repeat:
 //   node tools/snapshot.mjs --keys "" --tics 1 --keys w --tics 10 --keys a --tics 5
-// --eval EXPR evaluates a Bel expression at that point (e.g. to teleport the player).
+// --script "w:35 wd:20 -:10" runs KEYS:TICS steps like bin/doom-record.mjs.
+// --eval EXPR applies a Bel function of the world at that point, e.g. to teleport:
+//   --eval "(fn (w) (puts w 'px 832 'py 610 'pangle (/ pi -2)))"
 // It also prints init time and per-frame timings, so it doubles as a benchmark.
+import '../bin/bigstack.mjs';
 import { Bel } from '../interp/bel.js';
 import fs from 'fs';
 import path from 'path';
@@ -24,6 +27,10 @@ for (let i = 0; i < args.length; i++) {
   else if (a === '--tics') plan.push([keys, +args[++i]]);
   else if (a === '--every') every = +args[++i];
   else if (a === '--hires') hires = true;
+  else if (a === '--script') for (const step of args[++i].split(/[\s,]+/).filter(Boolean)) {
+    const [k, n] = step.split(':');
+    plan.push([k === '-' ? '' : k, +n]);
+  }
   else if (a === '--eval') plan.push([null, args[++i]]);
   else throw new Error('unknown argument ' + a);
 }
@@ -34,8 +41,8 @@ const bel = new Bel({
 });
 let t0 = performance.now();
 bel.loadFile('doom/main.bel');
-if (hires) bel.evalString('(set-resolution 320 200)');
-bel.call('doom-init', 'wad/e1m1.wad');
+if (hires) bel.evalString('(set screen-w 320 screen-h 200 view-h 168 half-w 160 half-h 84 focal 160)');
+let world = bel.call('doom-init', 'wad/e1m1.wad');
 const init = bel.takeOutput();
 console.log(`init ${(performance.now() - t0).toFixed(0)} ms`);
 if (init[0] !== 80 || init.length !== 769) throw new Error('bad palette packet');
@@ -82,10 +89,14 @@ let frame = null, n = 0, total = 0;
 const sounds = {};
 const times = [];
 for (const [k, tics] of plan) {
-  if (k === null) { console.log(tics, '=>', bel.print(bel.evalString(tics))); continue; }
+  if (k === null) {                             // EXPR is a function of the world
+    bel.evalString(`(set snapshot-fn ${tics})`);
+    world = bel.call('snapshot-fn', world);
+    continue;
+  }
   for (let i = 0; i < tics; i++) {
     const t = performance.now();
-    bel.call('doom-frame', k);
+    world = bel.call('doom-frame', world, k);
     const dt = performance.now() - t;
     times.push(dt); total += dt; n++;
     const pkt = bel.takeOutput();
@@ -105,4 +116,5 @@ const sorted = [...times].sort((a, b) => a - b);
 console.log(`${n} frames, avg ${(total / n).toFixed(1)} ms (${(1000 * n / total).toFixed(1)} fps), ` +
   `median ${sorted[n >> 1].toFixed(1)} ms, max ${sorted[n - 1].toFixed(1)} ms -> ${out}`);
 if (Object.keys(sounds).length) console.log('sounds', JSON.stringify(sounds));
-console.log('player', bel.print(bel.evalString('(list px py pangle health armor ammo)')));
+bel.evalString("(set snapshot-fn (fn (w) (map [at _ w] '(px py pangle health armor ammo))))");
+console.log('player', bel.print(bel.call('snapshot-fn', world)));

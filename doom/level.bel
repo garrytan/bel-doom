@@ -1,142 +1,164 @@
-; Doom in Bel: level geometry.
-
-;;;; Level
-
-; sector:  (floor ceil light sky floor-flat ceil-flat tag special cache)
-; line:    (x1 y1 x2 y2 front back blocking minx maxx miny maxy len2 flags special tag)
-; seg:     (x1 y1 x2 y2 len uoff yoff front back peg-top peg-bottom fake-light
-;           upper mid lower line)
+; Doom in Bel: level geometry, built once from the map lumps.
+;
+; sector:    (light sky floor-flat ceiling-flat tag)   by index; the heights
+;            (floor ceiling) live in the world because doors and lifts move
+; line:      (x1 y1 x2 y2 front back blocking minx maxx miny maxy len2
+;             flags special tag index)                 front/back: sector indices
+; seg:       (x1 y1 x2 y2 len uoff yoff front back peg-top peg-bottom
+;             fake-light upper mid lower)
 ; subsector: (sub segs sector)
-; node:    (node x y dx dy right-box left-box right left)
+; node:      (node x y dx dy right-box left-box right left)
 
-(def load-level ()
-  (let verts (records 'VERTEXES 4 [list (s16 _) (s16 (cddr _))])
-    (set sectors
-         (records 'SECTORS 26
-           (fn (b)
-             (let cflat (lump-name (drop 12 b))
-               (list (s16 b) (s16 (drop 2 b)) (s16 (drop 20 b))
-                     (id cflat 'F_SKY1)
-                     (lump-name (drop 4 b))
-                     cflat
-                     (s16 (drop 24 b)) (s16 (drop 22 b))
-                     (list nil nil nil))))))
-    (let sides (records 'SIDEDEFS 30
-                 (fn (b)
-                   (list (s16 b) (s16 (cddr b))
-                         (texture (lump-name (drop 4 b)))
-                         (texture (lump-name (drop 12 b)))
-                         (texture (lump-name (drop 20 b)))
-                         (nth (+ 1 (u16 (drop 28 b))) sectors))))
-      (let side (fn (i) (if (< i 65535) (nth (+ i 1) sides)))
-        (set lines
-             (records 'LINEDEFS 14
-               (fn (b)
-                 (withs ((x1 y1) (nth (+ 1 (u16 b)) verts)
-                         (x2 y2) (nth (+ 1 (u16 (cddr b))) verts)
-                         flags   (u16 (drop 4 b))
-                         right   (side (u16 (drop 10 b)))
-                         left    (side (u16 (drop 12 b)))
-                         r       player-radius)
-                   (list x1 y1 x2 y2
-                         (last right) (if left (last left))
-                         (or (no left) (flag flags 1))
-                         (- (min x1 x2) r) (+ (max x1 x2) r)
-                         (- (min y1 y2) r) (+ (max y1 y2) r)
-                         (+ (* (- x2 x1) (- x2 x1)) (* (- y2 y1) (- y2 y1)))
-                         flags (u16 (drop 6 b)) (u16 (drop 8 b))
-                         right left)))))
-        (set segs
-             (records 'SEGS 12
-               (fn (b)
-                 (withs ((x1 y1) (nth (+ 1 (u16 b)) verts)
-                         (x2 y2) (nth (+ 1 (u16 (drop 2 b))) verts)
-                         ln      (nth (+ 1 (u16 (drop 6 b))) lines)
-                         flags   (nth 13 ln)
-                         back?   (= (u16 (drop 8 b)) 1)
-                         sd      (nth (if back? 17 16) ln)
-                         other   (nth (if back? 16 17) ln))
-                   (list x1 y1 x2 y2
-                         (sqrt (+ (* (- x2 x1) (- x2 x1)) (* (- y2 y1) (- y2 y1))))
-                         (+ (s16 (drop 10 b)) (car sd))
-                         (cadr sd)
-                         (last sd)
-                         (if other (last other))
-                         (flag flags 8) (flag flags 16)
-                         (if (= y1 y2) -1 (= x1 x2) 1 0)
-                         (nth 3 sd) (nth 5 sd) (nth 4 sd)
-                         ln)))))
-        (set subsectors
-             (records 'SSECTORS 4
-               (fn (b)
-                 (let ss (first (u16 b) (drop (u16 (cddr b)) segs))
-                   (list 'sub ss (nth 8 (car ss)))))))
-        (set nodes
-             (records 'NODES 28
-               (fn (b)
-                 (let box [list (s16 _) (s16 (drop 2 _)) (s16 (drop 4 _)) (s16 (drop 6 _))]
-                   (list 'node (s16 b) (s16 (drop 2 b)) (s16 (drop 4 b)) (s16 (drop 6 b))
-                         (box (drop 8 b)) (box (drop 16 b))
-                         (u16 (drop 24 b)) (u16 (drop 26 b)))))))
-        (let child (fn (c)
-                     (if (> c 32767)
-                         (nth (+ 1 (- c 32768)) subsectors)
-                         (nth (+ c 1) nodes)))
-          (each n nodes
-            (let cell (drop 7 n)
-              (xar cell (child (car cell)))
-              (xar (cdr cell) (child (cadr cell))))))
-        (set root (last nodes))
-        (let start (find [= (nth 4 _) 1]
-                         (records 'THINGS 10
-                           [list (s16 _) (s16 (drop 2 _)) (s16 (drop 4 _)) (u16 (drop 6 _))]))
-          (set px (car start)
-               py (cadr start)
-               pangle (/ (* (caddr start) pi) 180)))))))
+(def load-level (lumps textures)
+  (withs (verts    (records 'VERTEXES 4 [list (s16 _) (s16 (cddr _))] lumps)
+          raw      (records 'SECTORS 26 [sector-record _ lumps] lumps)
+          sides    (records 'SIDEDEFS 30 [side-record _ textures] lumps)
+          lines    (map (fn (b i) (line-record b i verts sides))
+                        (records 'LINEDEFS 14 idfn lumps)
+                        (iota (/ (len (lump 'LINEDEFS lumps)) 14)))
+          segs     (records 'SEGS 12 [seg-record _ verts lines] lumps)
+          subs     (records 'SSECTORS 4
+                     [let ss (first (u16 _) (drop (u16 (cddr _)) segs))
+                       (list 'sub ss (nth 8 (car ss)))]
+                     lumps)
+          nodes    (records 'NODES 28 idfn lumps)
+          things   (records 'THINGS 10
+                     [list (s16 _) (s16 (drop 2 _)) (s16 (drop 4 _)) (u16 (drop 6 _)) (u16 (drop 8 _))]
+                     lumps)
+          start    (find [= (nth 4 _) 1] things))
+    (list (cons 'sectors (map cadr raw))
+          (cons 'heights (map car raw))
+          (cons 'lines lines)
+          (cons 'segs segs)
+          (cons 'root (build-node (- (len nodes) 1) nodes subs))
+          (cons 'grid (build-grid lines))
+          (cons 'things things)
+          (cons 'start (list (car start) (cadr start) (/ (* (caddr start) pi) 180))))))
 
-(def point-sector (x y)
-  (let n root
-    (while (no (id (car n) 'sub))
+; (heights static) for one sector.
+(def sector-record (b lumps)
+  (let cflat (lump-name (drop 12 b))
+    (list (list (s16 b) (s16 (drop 2 b)))
+          (list (s16 (drop 20 b))
+                (id cflat 'F_SKY1)
+                (flat (lump-name (drop 4 b)) lumps)
+                (if (no (id cflat 'F_SKY1)) (flat cflat lumps))
+                (s16 (drop 24 b))))))
+
+(def side-record (b textures)
+  (list (s16 b) (s16 (cddr b))
+        (cdr (get (lump-name (drop 4 b)) textures))
+        (cdr (get (lump-name (drop 12 b)) textures))
+        (cdr (get (lump-name (drop 20 b)) textures))
+        (u16 (drop 28 b))))
+
+(def line-record (b i verts sides)
+  (withs ((x1 y1) (nth (+ 1 (u16 b)) verts)
+          (x2 y2) (nth (+ 1 (u16 (cddr b))) verts)
+          flags   (u16 (drop 4 b))
+          right   (side-of-line (u16 (drop 10 b)) sides)
+          left    (side-of-line (u16 (drop 12 b)) sides)
+          r       player-radius)
+    (list x1 y1 x2 y2
+          (last right) (if left (last left))
+          (or (no left) (flag flags 1))
+          (- (min x1 x2) r) (+ (max x1 x2) r)
+          (- (min y1 y2) r) (+ (max y1 y2) r)
+          (+ (* (- x2 x1) (- x2 x1)) (* (- y2 y1) (- y2 y1)))
+          flags (u16 (drop 6 b)) (u16 (drop 8 b))
+          i right left)))
+
+(def side-of-line (i sides)
+  (if (< i 65535) (nth (+ i 1) sides)))
+
+(def seg-record (b verts lines)
+  (withs ((x1 y1) (nth (+ 1 (u16 b)) verts)
+          (x2 y2) (nth (+ 1 (u16 (drop 2 b))) verts)
+          ln      (nth (+ 1 (u16 (drop 6 b))) lines)
+          flags   (nth 13 ln)
+          back?   (= (u16 (drop 8 b)) 1)
+          sd      (nth (if back? 18 17) ln)
+          other   (nth (if back? 17 18) ln))
+    (list x1 y1 x2 y2
+          (sqrt (+ (* (- x2 x1) (- x2 x1)) (* (- y2 y1) (- y2 y1))))
+          (+ (s16 (drop 10 b)) (car sd))
+          (cadr sd)
+          (last sd)
+          (if other (last other))
+          (flag flags 8) (flag flags 16)
+          (if (= y1 y2) -1 (= x1 x2) 1 0)
+          (nth 3 sd) (nth 5 sd) (nth 4 sd))))
+
+; The BSP tree, built from the root down: children with the high bit set
+; are subsectors.
+(def build-node (i nodes subs)
+  (withs (b     (nth (+ i 1) nodes)
+          box   [list (s16 _) (s16 (drop 2 _)) (s16 (drop 4 _)) (s16 (drop 6 _))]
+          child [if (> _ 32767)
+                    (nth (+ 1 (- _ 32768)) subs)
+                    (build-node _ nodes subs)])
+    (list 'node (s16 b) (s16 (drop 2 b)) (s16 (drop 4 b)) (s16 (drop 6 b))
+          (box (drop 8 b)) (box (drop 16 b))
+          (child (u16 (drop 24 b))) (child (u16 (drop 26 b))))))
+
+; Which sector is (x, y) in?  Walk the BSP down to a subsector.
+(def point-sector (n x y)
+  (if (= (car n) 'sub)
+      (caddr n)
       (let (tag nx ny dx dy rb lb right left) n
-        (set n (if (> (* dy (- x nx)) (* dx (- y ny))) right left))))
-    (caddr n)))
+        (point-sector (if (> (* dy (- x nx)) (* dx (- y ny))) right left) x y))))
 
+;;;; The blockmap
 
 ; A coarse grid over the map: each 128-unit cell lists the lines within 32
 ; units of it, so collision checks only look at nearby walls.
-(def build-grid ()
-  (set grid-x (- (apply min (map [nth 8 _] lines)) 64)
-       grid-y (- (apply min (map [nth 10 _] lines)) 64))
-  (set grid-cols (+ 2 (floor (/ (- (apply max (map [nth 9 _] lines)) grid-x) 128)))
-       grid-rows (+ 2 (floor (/ (- (apply max (map [nth 11 _] lines)) grid-y) 128))))
-  (set grid (map [map [do nil] (iota grid-cols)] (iota grid-rows)))
-  (each ln lines
-    (let (x1 y1 x2 y2 front back blocking minx maxx miny maxy . rest) ln
-      (for cy (grid-row (- miny 16)) (grid-row (+ maxy 16))
-        (let row (nth (+ cy 1) grid)
-          (for cx (grid-col (- minx 16)) (grid-col (+ maxx 16))
-            (let cell (drop cx row)
-              (xar cell (cons ln (car cell))))))))))
+; grid: (x0 y0 columns rows cells)
+(def build-grid (lines)
+  (withs (x0   (- (apply min (map [nth 8 _] lines)) 64)
+          y0   (- (apply min (map [nth 10 _] lines)) 64)
+          cols (+ 2 (floor (/ (- (apply max (map [nth 9 _] lines)) x0) 128)))
+          rows (+ 2 (floor (/ (- (apply max (map [nth 11 _] lines)) y0) 128)))
+          g    (list x0 y0 cols rows nil))
+    (list x0 y0 cols rows
+          (map (fn (cy)
+                 (let row (keep [<= (grid-row g (- (nth 10 _) 16)) cy (grid-row g (+ (nth 11 _) 16))]
+                                lines)
+                   (map (fn (cx)
+                          (keep [<= (grid-col g (- (nth 8 _) 16)) cx (grid-col g (+ (nth 9 _) 16))]
+                                row))
+                        (iota cols))))
+               (iota rows)))))
 
-(def grid-col (x) (clamp (floor (/ (- x grid-x) 128)) 0 (- grid-cols 1)))
-(def grid-row (y) (clamp (floor (/ (- y grid-y) 128)) 0 (- grid-rows 1)))
+(def grid-col (g x)
+  (clamp (floor (/ (- x (car g)) 128)) 0 (- (caddr g) 1)))
 
-(def lines-near (x y)
-  (car (drop (grid-col x) (nth (+ 1 (grid-row y)) grid))))
+(def grid-row (g y)
+  (clamp (floor (/ (- y (cadr g)) 128)) 0 (- (nth 4 g) 1)))
+
+(def lines-near (g x y)
+  (nth (+ 1 (grid-col g x)) (nth (+ 1 (grid-row g y)) (nth 5 g))))
 
 ; Is the straight line between two points free of walls and closed doors?
-(def clear-line (ax ay bx by)
-  (with (minx (min ax bx) maxx (max ax bx) miny (min ay by) maxy (max ay by)
-         dx (- bx ax) dy (- by ay))
-    (no (some (fn (ln)
-                (let (x1 y1 x2 y2 front back blocking lx1 lx2 ly1 ly2 . rest) ln
-                  (and (< lx1 maxx) (> lx2 minx) (< ly1 maxy) (> ly2 miny)
-                       (or (no back)
-                           (<= (min (cadr front) (cadr back)) (max (car front) (car back))))
-                       (< (* (- (* dx (- y1 ay)) (* dy (- x1 ax)))
-                             (- (* dx (- y2 ay)) (* dy (- x2 ax))))
-                          0)
-                       (< (* (- (* (- x2 x1) (- ay y1)) (* (- y2 y1) (- ax x1)))
-                             (- (* (- x2 x1) (- by y1)) (* (- y2 y1) (- bx x1))))
-                          0))))
-              lines))))
+; Only the lines in grid cells along the way can be in the way: sampling
+; every 64 units keeps every point of the line within 32 units of a sample,
+; and each cell lists the lines within 32 units of it.
+(def clear-line (g heights ax ay bx by)
+  (withs (dx (- bx ax)
+          dy (- by ay)
+          n  (+ 1 (ceil (/ (max (abs dx) (abs dy)) 64))))
+    (no (some (fn (i)
+                (some [blocks-sight _ heights ax ay bx by dx dy]
+                      (lines-near g (+ ax (/ (* i dx) n)) (+ ay (/ (* i dy) n)))))
+              (iota (+ n 1))))))
+
+(def blocks-sight (ln heights ax ay bx by dx dy)
+  (let (x1 y1 x2 y2 front back . rest) ln
+    (and (or (no back)
+             (let ((ff fc) (bf bc)) (list (nth (+ front 1) heights) (nth (+ back 1) heights))
+               (<= (min fc bc) (max ff bf))))
+         (< (* (- (* dx (- y1 ay)) (* dy (- x1 ax)))
+               (- (* dx (- y2 ay)) (* dy (- x2 ax))))
+            0)
+         (< (* (- (* (- x2 x1) (- ay y1)) (* (- y2 y1) (- ax x1)))
+               (- (* (- x2 x1) (- by y1)) (* (- y2 y1) (- bx x1))))
+            0))))

@@ -1,5 +1,5 @@
 // Frame protocol decoding shared by the browser worker, bin/doom-term.mjs and bin/doom-record.mjs.
-// Engine output (see CONTRACT.md): 'P' + 768 palette bytes once at init, 'F' + w*h column-major
+// Engine output (see docs/protocol.md): 'P' + 768 palette bytes once at init, 'F' + w*h column-major
 // palette indices once per doom-frame. Anything else the engine prints is passed through as text.
 
 export const TIC_RATE = 35;
@@ -65,18 +65,6 @@ export function loadSounds(wadBytes) {
   return sounds;
 }
 
-// Required parameters of a Bel closure (lit clo env parms body); (o x) optionals and a rest tail don't count.
-// The functional engine's (doom-frame world keys) takes the world doom-init returned and returns the next one.
-function requiredParams(bel, f) {
-  const pair = (x) => x !== null && typeof x === 'object' && 'a' in x && 'd' in x;
-  if (!pair(f)) return 0;
-  let p = f;
-  for (let i = 0; i < 3 && pair(p); i++) p = p.d;
-  if (!pair(p)) return 0;
-  let n = 0;
-  for (let q = p.a; pair(q); q = q.d) if (!(pair(q.a) && q.a.a === bel.sym('o'))) n++;
-  return n;
-}
 
 // Boots the interpreter and engine; returns the screen size, palette and a frame(keys) stepper.
 export function bootEngine({ Bel, readFile, wad = 'wad/e1m1.wad', hires = false, status = () => {}, log = () => {} }) {
@@ -85,11 +73,12 @@ export function bootEngine({ Bel, readFile, wad = 'wad/e1m1.wad', hires = false,
   const bel = new Bel({ readFile });
   status('loading doom/main.bel');
   bel.loadFile('doom/main.bel');
-  if (hires) bel.evalString('(set-resolution 320 200)');
+  if (hires) bel.loadFile('doom/hires.bel');
   log(latin1(bel.takeOutput()));
   status(`doom-init: loading and parsing ${wad}`);
-  const functional = requiredParams(bel, bel.global('doom-frame')) >= 2;
   let world = bel.call('doom-init', wad);
+  // The functional engine returns the world from doom-init and threads it through doom-frame.
+  const functional = world !== bel.t && world !== bel.nil && typeof world === 'object';
   const init = splitPacket(bel.takeOutput(), 'P', 768);
   log(init.text);
   if (!init.data) throw new Error('doom-init wrote no P (palette) packet');

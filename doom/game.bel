@@ -1,267 +1,356 @@
-; Doom in Bel: the player, movement, weapons and level specials.
+; Doom in Bel: the game.  (step w keys) is a function from the world and
+; the keys held to the world one tic later.
 
-;;;; Player
+(def step (w keys)
+  (update-hud
+    (run-actors
+      (run-movers
+        (player-tic (puts w 'tic (+ 1 (at 'tic w)) 'sounds nil 'blasts nil) keys)))))
 
-(def reset-player ()
-  (set px start-x
-       py start-y
-       pangle start-angle
-       health 100
-       armor 0
-       ammo 50
-       wtics 0
-       bob 0
-       dead-tics 0
-       pain-tics 0
-       bonus-tics 0
-       use-held nil)
-  (update-height))
+;;;; The player
 
-(def update-height ()
-  (set pfloor (car (point-sector px py))
-       vz (+ pfloor (if (> health 0) view-height (max 10 (- view-height (* 3 dead-tics)))))))
+(def reset-player (w)
+  (let (x y angle) (at 'start (at 'lv w))
+    (update-height
+      (puts w 'px x 'py y 'pangle angle 'health 100 'armor 0 'ammo 50 'wtics 0 'bob 0
+              'dead-tics 0 'pain-tics 0 'bonus-tics 0 'use-held nil))))
 
-(def player-tic (keys)
-  (set pain-tics (max 0 (- pain-tics 1)) bonus-tics (max 0 (- bonus-tics 1)))
-  (if (> health 0)
-      (do (move-player keys)
-          (weapon-tic (mem \f keys))
-          (use-tic (mem \u keys))
-          (pick-up-items))
-      (do (set dead-tics (+ dead-tics 1))
-          (when (and (> dead-tics 30) (or (mem \u keys) (mem \f keys)))
-            (reset-player)
-            (set use-held t wtics 12))))
-  (update-height))
+(def update-height (w)
+  (let sec (point-sector (at 'root (at 'lv w)) (at 'px w) (at 'py w))
+    (puts w 'psec sec 'pfloor (car (nth (+ sec 1) (at 'heights w))))))
 
-(def move-player (keys)
-  (with (run (if (mem \r keys) 2 1) fw 0 sd 0)
-    (if (mem \a keys) (set pangle (+ pangle (* run turn-speed))))
-    (if (mem \d keys) (set pangle (- pangle (* run turn-speed))))
-    (if (mem \w keys) (set fw (+ fw walk-speed)))
-    (if (mem \s keys) (set fw (- fw walk-speed)))
-    (if (mem \e keys) (set sd (+ sd walk-speed)))
-    (if (mem \q keys) (set sd (- sd walk-speed)))
-    (set bob (if (and (= fw 0) (= sd 0)) 0 1))
-    (unless (= bob 0)
-      (with (c (cos pangle) s (sin pangle) ox px oy py)
-        (try-move (+ px (* run (+ (* fw c) (* sd s))))
-                  (+ py (* run (- (* fw s) (* sd c)))))
-        (cross-lines ox oy)))))
+(def player-tic (w keys)
+  (let w (puts w 'pain-tics  (max 0 (- (at 'pain-tics w) 1))
+                 'bonus-tics (max 0 (- (at 'bonus-tics w) 1)))
+    (update-height
+      (if (> (at 'health w) 0)
+          (pick-up-items (use-tic (weapon-tic (move-player w keys) (mem \f keys)) (mem \u keys)))
+          (let w (puts w 'dead-tics (+ 1 (at 'dead-tics w)))
+            (if (and (> (at 'dead-tics w) 30) (or (mem \u keys) (mem \f keys)))
+                (puts (reset-player w) 'use-held t 'wtics 12)
+                w))))))
 
-(def blocks (front back)
-  (let (bf bc . rest) back
-    (let (ff fc . rest) front
-      (or (> (- (max ff bf) pfloor) max-step)
-          (< (- (min fc bc) (max ff bf)) 56)))))
+(def move-player (w keys)
+  (withs (run   (if (mem \r keys) 2 1)
+          angle (+ (at 'pangle w)
+                   (if (mem \a keys) (* run turn-speed) 0)
+                   (if (mem \d keys) (* run turn-speed -1) 0))
+          fw    (+ (if (mem \w keys) walk-speed 0) (if (mem \s keys) (- walk-speed) 0))
+          sd    (+ (if (mem \e keys) walk-speed 0) (if (mem \q keys) (- walk-speed) 0))
+          w     (puts w 'pangle angle 'bob (if (and (= fw 0) (= sd 0)) 0 1)))
+    (if (and (= fw 0) (= sd 0))
+        w
+        (with (c (cos angle) s (sin angle))
+          (cross-lines (try-move w (+ (at 'px w) (* run (+ (* fw c) (* sd s))))
+                                   (+ (at 'py w) (* run (- (* fw s) (* sd c)))))
+                       (at 'px w) (at 'py w))))))
 
-; Push the point (x, y) out of every wall and solid thing it is within
-; player-radius of, then move there if the floor is not too high a step.
-(def try-move (x y)
-  (repeat 2
-    (each (x1 y1 x2 y2 front back blocking minx maxx miny maxy len2 . rest) (lines-near x y)
-      (unless (or (< x minx) (> x maxx) (< y miny) (> y maxy))
-        (when (or blocking (blocks front back))
-          (withs (dx (- x2 x1)
-                  dy (- y2 y1)
-                  f  (clamp (/ (+ (* (- x x1) dx) (* (- y y1) dy)) len2) 0 1)
-                  cx (+ x1 (* f dx))
-                  cy (+ y1 (* f dy))
-                  d2 (+ (* (- x cx) (- x cx)) (* (- y cy) (- y cy))))
-            (when (< d2 (* player-radius player-radius))
-              (let d (sqrt d2)
-                (if (> d 0.001)
-                    (set x (+ cx (* (- x cx) (/ player-radius d)))
-                         y (+ cy (* (- y cy) (/ player-radius d)))))))))))
-    (each m solids
-      (when (m 'solid)
-        (withs (r  (+ (m 'radius) player-radius)
-                dx (- x (m 'x))
-                dy (- y (m 'y)))
-          (when (and (< (abs dx) r) (< (abs dy) r))
-            (let d (sqrt (+ (* dx dx) (* dy dy)))
-              (if (and (< d r) (> d 0.001))
-                  (set x (+ (m 'x) (* dx (/ r d)))
-                       y (+ (m 'y) (* dy (/ r d)))))))))))
-  (let sec (point-sector x y)
-    (when (and (<= (- (car sec) pfloor) max-step)
-               (>= (- (cadr sec) (car sec)) 56))
-      (set px x py y))))
+; Push (x, y) out of every wall and solid thing it is within player-radius
+; of, twice, then move there unless the floor is too high a step.
+(def try-move (w x y)
+  (withs (lv      (at 'lv w)
+          heights (at 'heights w)
+          (x y)   (push-out w (push-out w (list x y)))
+          sec     (point-sector (at 'root lv) x y)
+          (ff fc) (nth (+ sec 1) heights))
+    (if (and (<= (- ff (at 'pfloor w)) max-step) (>= (- fc ff) 56))
+        (puts w 'px x 'py y)
+        w)))
+
+(def push-out (w xy)
+  (withs (lv      (at 'lv w)
+          heights (at 'heights w)
+          floor   (at 'pfloor w)
+          r       player-radius
+          walls   (foldl (fn (ln (x y))
+                           (let (x1 y1 x2 y2 front back blocking minx maxx miny maxy len2 . rest) ln
+                             (if (or (< x minx) (> x maxx) (< y miny) (> y maxy)
+                                     (no (or blocking (opening-blocks heights front back floor))))
+                                 (list x y)
+                                 (withs (dx (- x2 x1)
+                                         dy (- y2 y1)
+                                         f  (clamp (/ (+ (* (- x x1) dx) (* (- y y1) dy)) len2) 0 1)
+                                         cx (+ x1 (* f dx))
+                                         cy (+ y1 (* f dy))
+                                         d2 (+ (* (- x cx) (- x cx)) (* (- y cy) (- y cy)))
+                                         d  (if (< d2 (* r r)) (sqrt d2) r))
+                                   (if (and (< d r) (> d 0.001))
+                                       (list (+ cx (* (- x cx) (/ r d))) (+ cy (* (- y cy) (/ r d))))
+                                       (list x y))))))
+                         xy
+                         (lines-near (at 'grid lv) (car xy) (cadr xy))))
+    (foldl (fn (m (x y))
+             (if (at 'solid m)
+                 (withs (rr (+ (at 'radius m) r)
+                         dx (- x (at 'x m))
+                         dy (- y (at 'y m))
+                         d  (if (and (< (abs dx) rr) (< (abs dy) rr)) (sqrt (+ (* dx dx) (* dy dy))) rr))
+                   (if (and (< d rr) (> d 0.001))
+                       (list (+ (at 'x m) (* dx (/ rr d))) (+ (at 'y m) (* dy (/ rr d))))
+                       (list x y)))
+                 (list x y)))
+           walls
+           (at 'mobjs w))))
 
 (def side-of (ln x y)
   (let (x1 y1 x2 y2 . rest) ln
     (< (* (- x2 x1) (- y y1)) (* (- y2 y1) (- x x1)))))
 
 ; Walk-over triggers fire when the player crosses their line.
-(def cross-lines (ox oy)
-  (each ln (lines-near px py)
-    (when (and (in (nth 14 ln) 2 88)
-               (no (= (side-of ln ox oy) (side-of ln px py))))
-      (let (x1 y1 x2 y2 . rest) ln
-        (when (no (= (< (* (- px ox) (- y1 oy)) (* (- py oy) (- x1 ox)))
-                     (< (* (- px ox) (- y2 oy)) (* (- py oy) (- x2 ox)))))
-          (trigger ln))))))
+(def cross-lines (w ox oy)
+  (with (px (at 'px w) py (at 'py w))
+    (foldl (fn (ln w)
+             (let (x1 y1 x2 y2 . rest) ln
+               (if (and (in (nth 14 ln) 2 88)
+                        (no (= (side-of ln ox oy) (side-of ln px py)))
+                        (no (= (< (* (- px ox) (- y1 oy)) (* (- py oy) (- x1 ox)))
+                               (< (* (- px ox) (- y2 oy)) (* (- py oy) (- x2 ox))))))
+                   (trigger w ln)
+                   w)))
+           w
+           (lines-near (at 'grid (at 'lv w)) px py))))
 
-;;;; Weapon
+;;;; The pistol
 
-(def weapon-tic (fire)
-  (if (> wtics 0)
-      (set wtics (- wtics 1))
-      (and fire (> ammo 0))
-      (fire-pistol)))
+(def weapon-tic (w fire)
+  (if (> (at 'wtics w) 0)
+      (puts w 'wtics (- (at 'wtics w) 1))
+      (and fire (> (at 'ammo w) 0))
+      (fire-pistol w)
+      w))
 
-; Hitscan along the view direction, aiming at the nearest shootable thing
-; in a narrow cone that we can see; otherwise the bullet puffs on a wall.
-(def fire-pistol ()
-  (set ammo (- ammo 1) wtics 12)
-  (sfx "DSPISTOL")
-  (make-noise)
-  (with (target nil best 4096 c (cos pangle) s (sin pangle))
-    (each m actors
-      (when (m 'shootable)
-        (withs (dx (- (m 'x) px)
-                dy (- (m 'y) py)
-                z  (+ (* dx c) (* dy s))
-                l  (- (* dx s) (* dy c)))
-          (if (and (> z 0) (< z best)
-                   (< (abs l) (+ (m 'radius) (* z 0.06)))
-                   (clear-line px py (m 'x) (m 'y)))
-              (set target m best z)))))
+; Hitscan along the view direction at the nearest shootable thing in a
+; narrow cone that we can see; otherwise the bullet puffs on a wall.
+(def fire-pistol (w)
+  (withs (w      (make-noise (sound (puts w 'ammo (- (at 'ammo w) 1) 'wtics 12) "DSPISTOL"))
+          lv     (at 'lv w)
+          px     (at 'px w)
+          py     (at 'py w)
+          c      (cos (at 'pangle w))
+          s      (sin (at 'pangle w))
+          target (cadr (foldl (fn (m (best target))
+                                (withs (dx (- (at 'x m) px)
+                                        dy (- (at 'y m) py)
+                                        z  (+ (* dx c) (* dy s))
+                                        l  (- (* dx s) (* dy c)))
+                                  (if (and (at 'shootable m) (> z 0) (< z best)
+                                           (< (abs l) (+ (at 'radius m) (* z 0.06)))
+                                           (clear-line (at 'grid lv) (at 'heights w) px py (at 'x m) (at 'y m)))
+                                      (list z m)
+                                      (list best target))))
+                              (list 4096 nil)
+                              (at 'mobjs w))))
     (if target
-        (do (spawn-effect "BLUD" "ABC" (- (target 'x) (* 8 c)) (- (target 'y) (* 8 s))
-                          (+ (car (target 'sec)) 32))
-            (damage target (* 5 (+ 1 (random 3)))))
-        (let d (wall-distance c s)
-          (spawn-effect "PUFF" "ABCD" (+ px (* c (- d 4))) (+ py (* s (- d 4))) (- vz 12))))))
+        (withs (r (random w)
+                w (spin w)
+                w (spawn-effect w "BLUD" "ABC" (- (at 'x target) (* 8 c)) (- (at 'y target) (* 8 s))
+                                (+ (car (nth (+ (at 'sec target) 1) (at 'heights w))) 32)))
+          (damage-id w (at 'id target) (* 5 (+ 1 (mod r 3)))))
+        (let d (wall-distance w c s)
+          (spawn-effect w "PUFF" "ABCD" (+ px (* c (- d 4))) (+ py (* s (- d 4))) (- (eye-z w) 12))))))
 
 ; Distance along the ray from the player to the first wall it would hit.
-(def wall-distance (c s)
-  (let best 2048
-    (each (x1 y1 x2 y2 front back . rest) lines
-      (when (or (no back)
-                (> (max (car front) (car back)) (- vz 12))
-                (< (min (cadr front) (cadr back)) vz))
-        (withs (dx    (- x2 x1)
-                dy    (- y2 y1)
-                denom (- (* c dy) (* s dx)))
-          (unless (= denom 0)
-            (withs (t1 (/ (- (* (- x1 px) dy) (* (- y1 py) dx)) denom)
-                    u  (/ (- (* (- x1 px) s) (* (- y1 py) c)) denom))
-              (if (and (> t1 0) (< t1 best) (>= u 0) (<= u 1))
-                  (set best t1)))))))
-    best))
+(def wall-distance (w c s)
+  (with (px      (at 'px w)
+         py      (at 'py w)
+         vz      (eye-z w)
+         heights (at 'heights w))
+    (foldl (fn ((x1 y1 x2 y2 front back . rest) best)
+             (withs (dx    (- x2 x1)
+                     dy    (- y2 y1)
+                     denom (- (* c dy) (* s dx)))
+               (if (or (= denom 0)
+                       (and back
+                            (let ((ff fc) (bf bc)) (list (nth (+ front 1) heights) (nth (+ back 1) heights))
+                              (and (<= (max ff bf) (- vz 12)) (>= (min fc bc) vz)))))
+                   best
+                   (withs (t1 (/ (- (* (- x1 px) dy) (* (- y1 py) dx)) denom)
+                           u  (/ (- (* (- x1 px) s) (* (- y1 py) c)) denom))
+                     (if (and (> t1 0) (< t1 best) (>= u 0) (<= u 1)) t1 best)))))
+           2048
+           (at 'lines (at 'lv w)))))
 
 ;;;; Damage and pickups
 
-(def hurt-player (n)
-  (when (> health 0)
-    (let saved (min armor (floor (/ n 3)))
-      (set armor  (- armor saved)
-           health (max 0 (- health (- n saved)))
-           pain-tics (min 12 (+ pain-tics 4 (floor (/ n 4)))))
-      (sfx (if (> health 0) "DSPLPAIN" "DSPLDETH")))))
+(def hurt-player (w n)
+  (if (> (at 'health w) 0)
+      (withs (saved  (min (at 'armor w) (floor (/ n 3)))
+              health (max 0 (- (at 'health w) (- n saved))))
+        (sound (puts w 'armor (- (at 'armor w) saved)
+                       'health health
+                       'pain-tics (min 12 (+ (at 'pain-tics w) 4 (floor (/ n 4)))))
+               (if (> health 0) "DSPLPAIN" "DSPLDETH")))
+      w))
 
-(def pick-up-items ()
-  (let got nil
-    (each m items
-      (when (and (< (abs (- (m 'x) px)) 32) (< (abs (- (m 'y) py)) 32))
-        (with (amount (car (m 'args)) most (cadr (m 'args)))
-          (when (case (m 'class)
-                  health (if (or (< health most) (= amount 1))
-                             (set health (min most (+ health amount))))
-                  armor  (if (or (< armor most) (= amount 1))
-                             (set armor (min most (if (= amount 1) (+ armor 1) (max armor amount)))))
-                  ammo   (if (< ammo 200)
-                             (set ammo (min 200 (+ ammo amount))))
-                         t)
-            (remove m)
-            (set got t)))))
-    (when got
-      (sfx "DSITEMUP")
-      (set bonus-tics 4
-           mobjs  (keep [no (= (_ 'state) 'gone)] mobjs)
-           actors (keep [no (= (_ 'state) 'gone)] actors)
-           items  (keep [no (= (_ 'state) 'gone)] items)))))
+(def pick-up-items (w)
+  (withs (px (at 'px w)
+          py (at 'py w)
+          (w2 got ms) (foldl (fn (m (w got acc))
+                               (if (and (in (at 'class m) 'health 'armor 'ammo 'item)
+                                        (< (abs (- (at 'x m) px)) 32)
+                                        (< (abs (- (at 'y m) py)) 32))
+                                   (let w3 (pick-up w m)
+                                     (if w3 (list w3 t acc) (list w got (cons m acc))))
+                                   (list w got (cons m acc))))
+                             (list w nil nil)
+                             (at 'mobjs w)))
+    (if got
+        (sound (puts w2 'mobjs (rev ms) 'bonus-tics 4) "DSITEMUP")
+        w)))
+
+; The world after taking the item, or nil if we can't use it.
+(def pick-up (w m)
+  (with (amount (car (at 'args m))
+         most   (cadr (at 'args m))
+         health (at 'health w)
+         armor  (at 'armor w)
+         ammo   (at 'ammo w))
+    (case (at 'class m)
+      health (if (or (< health most) (= amount 1))
+                 (puts w 'health (min most (+ health amount))))
+      armor  (if (or (< armor most) (= amount 1))
+                 (puts w 'armor (min most (if (= amount 1) (+ armor 1) (max armor amount)))))
+      ammo   (if (< ammo 200)
+                 (puts w 'ammo (min 200 (+ ammo amount))))
+             w)))
 
 ;;;; Doors, lifts and switches
 
 ; A mover slides a sector's floor (slot 0) or ceiling (slot 1) toward a
-; target height, optionally waits, then heads back to where it started.
-(set movers nil)
+; target height, optionally waits, then heads back to where it started:
+; (sector slot target speed wait back).
+(def run-movers (w)
+  (let (w2 . ms) (foldl (fn (m (w . acc))
+                          (let (w3 . m2) (move-step w m)
+                            (cons w3 (if m2 (cons m2 acc) acc))))
+                        (cons w nil)
+                        (at 'movers w))
+    (puts w2 'movers (rev ms))))
 
-(def start-mover (sec slot target speed (o wait) (o back))
-  (unless (some [id (car _) sec] movers)
-    (push (list sec slot target speed wait back) movers)
-    t))
+(def move-step (w m)
+  (let (sec slot target speed wait back) m
+    (let cur (nth (+ slot 1) (nth (+ sec 1) (at 'heights w)))
+      (if (no (= cur target))
+          (cons (set-height w sec slot (if (< cur target)
+                                           (min target (+ cur speed))
+                                           (max target (- cur speed))))
+                m)
+          (and wait (> wait 0))
+          (cons w (list sec slot target speed (- wait 1) back))
+          back
+          (if (= (at 'psec w) sec)
+              (cons w m)
+              (cons (sound w (if (= slot 1) "DSDORCLS" "DSPSTOP"))
+                    (list sec slot back speed nil nil)))
+          (cons w nil)))))
 
-(def run-movers ()
-  (set movers
-       (keep (fn (m)
-               (let (sec slot target speed wait back) m
-                 (let cell (drop slot sec)
-                   (if (no (= (car cell) target))
-                       (do (xar cell (if (< (car cell) target)
-                                         (min target (+ (car cell) speed))
-                                         (max target (- (car cell) speed))))
-                           t)
-                       (and wait (> wait 0))
-                       (do (xar (drop 4 m) (- wait 1)) t)
-                       back
-                       (do (unless (id (point-sector px py) sec)
-                             (sfx (if (= slot 1) "DSDORCLS" "DSPSTOP"))
-                             (xar (cddr m) back)
-                             (xar (drop 5 m) nil))
-                           t)))))
-             movers)))
+(def set-height (w sec slot h)
+  (let heights (at 'heights w)
+    (puts w 'heights (append (first sec heights)
+                             (list (if (= slot 0)
+                                       (list h (cadr (nth (+ sec 1) heights)))
+                                       (list (car (nth (+ sec 1) heights)) h)))
+                             (drop (+ sec 1) heights)))))
 
-(def neighbors (sec)
-  (accum a
-    (each (x1 y1 x2 y2 front back . rest) lines
-      (if (and back (id front sec)) (a back)
-          (and back (id back sec))  (a front)))))
+(def moving (w sec)
+  (some [= (car _) sec] (at 'movers w)))
 
-(def lowest-ceiling (sec) (apply min (map cadr (neighbors sec))))
-(def lowest-floor (sec) (apply min (car sec) (map car (neighbors sec))))
+(def start-mover (w m sfx)
+  (if (moving w (car m))
+      w
+      (sound (puts w 'movers (cons m (at 'movers w))) sfx)))
 
-(def tagged (tag)
-  (keep [= (nth 7 _) tag] sectors))
+(def neighbors (w sec)
+  (keep idfn (map [let (x1 y1 x2 y2 front back . rest) _
+                    (if (and back (= front sec)) back
+                        (and back (= back sec))  front)]
+                  (at 'lines (at 'lv w)))))
 
-(def open-door (sec speed (o close))
-  (if (start-mover sec 1 (- (lowest-ceiling sec) 4) speed (if close 60) (if close (cadr sec)))
-      (sfx (if (> speed 4) "DSBDOPN" "DSDOROPN"))))
+(def lowest-ceiling (w sec)
+  (apply min (map [cadr (nth (+ _ 1) (at 'heights w))] (neighbors w sec))))
 
-(def lower-lift (sec)
-  (if (start-mover sec 0 (lowest-floor sec) 8 70 (car sec))
-      (sfx "DSPSTART")))
+(def lowest-floor (w sec)
+  (apply min (car (nth (+ sec 1) (at 'heights w)))
+             (map [car (nth (+ _ 1) (at 'heights w))] (neighbors w sec))))
+
+(def tagged (w tag)
+  (keep [= (nth 5 (nth (+ _ 1) (at 'sectors (at 'lv w)))) tag]
+        (iota (len (at 'heights w)))))
+
+(def open-door (w sec speed close)
+  (start-mover w
+               (list sec 1 (- (lowest-ceiling w sec) 4) speed (if close 105)
+                     (if close (cadr (nth (+ sec 1) (at 'heights w)))))
+               (if (> speed 4) "DSBDOPN" "DSDOROPN")))
+
+(def lower-lift (w sec)
+  (start-mover w (list sec 0 (lowest-floor w sec) 8 70 (car (nth (+ sec 1) (at 'heights w))))
+               "DSPSTART"))
 
 ; Pressing u uses the nearest special line in front of us.
-(def use-tic (use)
-  (if (and use (no use-held))
-      (with (best nil bestd 72 c (cos pangle) s (sin pangle))
-        (each ln (lines-near px py)
-          (let (x1 y1 x2 y2 front back blocking minx maxx miny maxy len2 flags special . rest) ln
-            (when (and (> special 0) (side-of ln px py))
-              (withs (dx (- x2 x1)
-                      dy (- y2 y1)
-                      f  (clamp (/ (+ (* (- px x1) dx) (* (- py y1) dy)) len2) 0 1)
-                      cx (+ x1 (* f dx))
-                      cy (+ y1 (* f dy))
-                      d  (dist px py cx cy))
-                (if (and (< d bestd) (> (+ (* (- cx px) c) (* (- cy py) s)) (* d 0.5)))
-                    (set best ln bestd d))))))
-        (if best (trigger best) (sfx "DSNOWAY"))))
-  (set use-held use))
+(def use-tic (w use)
+  (puts (if (and use (no (at 'use-held w)))
+            (withs (px   (at 'px w)
+                    py   (at 'py w)
+                    c    (cos (at 'pangle w))
+                    s    (sin (at 'pangle w))
+                    best (cadr (foldl (fn (ln (bestd best))
+                                        (let (x1 y1 x2 y2 front back blocking minx maxx miny maxy len2
+                                              flags special . rest) ln
+                                          (if (and (> special 0) (side-of ln px py))
+                                              (withs (dx (- x2 x1)
+                                                      dy (- y2 y1)
+                                                      f  (clamp (/ (+ (* (- px x1) dx) (* (- py y1) dy)) len2) 0 1)
+                                                      cx (+ x1 (* f dx))
+                                                      cy (+ y1 (* f dy))
+                                                      d  (dist px py cx cy))
+                                                (if (and (< d bestd) (> (+ (* (- cx px) c) (* (- cy py) s)) (* d 0.5)))
+                                                    (list d ln)
+                                                    (list bestd best)))
+                                              (list bestd best))))
+                                      (list 72 nil)
+                                      (lines-near (at 'grid (at 'lv w)) px py))))
+              (if best (trigger w best) (sound w "DSNOWAY")))
+            w)
+        'use-held use))
 
-(def trigger (ln)
-  (let (x1 y1 x2 y2 front back blocking minx maxx miny maxy len2 flags special tag . rest) ln
-    (if (in special 1 26 117)  (if back (open-door back (if (= special 117) 8 4) t))
-        (in special 31 32 118) (if back (open-door back (if (= special 118) 8 4)))
-        (= special 2)          (do (each sec (tagged tag) (open-door sec 4))
-                                   (xar (drop 13 ln) 0))
-        (in special 62 88)     (do (if (= special 62) (sfx "DSSWTCHN"))
-                                   (each sec (tagged tag) (lower-lift sec)))
-        (= special 23)         (do (each sec (tagged tag)
-                                     (start-mover sec 0 (lowest-floor sec) 8))
-                                   (xar (drop 13 ln) 0))
-        (= special 11)         (do (sfx "DSSWTCHN") (reset-player))
-                               (sfx "DSNOWAY"))))
+(def trigger (w ln)
+  (let (x1 y1 x2 y2 front back blocking minx maxx miny maxy len2 flags special tag i . rest) ln
+    (if (and (in special 2 23) (mem i (at 'used w)))
+        w
+        (in special 1 26 117)
+        (if back (open-door w back (if (= special 117) 8 4) t) w)
+        (in special 31 32 118)
+        (if back (open-door w back (if (= special 118) 8 4) nil) w)
+        (= special 2)
+        (puts (foldl (fn (sec w) (open-door w sec 4 nil)) w (tagged w tag))
+              'used (cons i (at 'used w)))
+        (in special 62 88)
+        (foldl (fn (sec w) (lower-lift w sec))
+               (if (= special 62) (sound w "DSSWTCHN") w)
+               (tagged w tag))
+        (= special 23)
+        (puts (foldl (fn (sec w) (start-mover w (list sec 0 (lowest-floor w sec) 8 nil nil) "DSPSTART"))
+                     w
+                     (tagged w tag))
+              'used (cons i (at 'used w)))
+        (= special 11)
+        (reset-player (sound w "DSSWTCHN"))
+        (sound w "DSNOWAY"))))
+
+;;;; The status bar
+
+(def face (w)
+  (let health (at 'health w)
+    (if (<= health 0)
+        'STFDEAD0
+        (let tic (at 'tic w)
+          (sym (list \S \T \F \S \T
+                     (nchar (+ 48 (floor (/ (* (- 100 (min health 100)) 5) 101))))
+                     (nchar (+ 48 (if (< (mod tic 60) 50) 1 (mod (floor (/ tic 60)) 3))))))))))
+
+(def update-hud (w)
+  (let state (list (at 'health w) (at 'armor w) (at 'ammo w) (face w))
+    (if (= state (car (at 'hud w)))
+        w
+        (puts w 'hud (cons state (hud-columns (at 'lv w) state))))))
