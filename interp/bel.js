@@ -1027,19 +1027,30 @@ function compCall(e) {
     let f;
     if (gsym !== null && !gsym.lexb && !gsym.dynb && gsym.gcell !== null) f = gsym.gcell.d;
     else f = opn(a, false);
+    const n = argn.length;
     if (f instanceof Pair) {
       const x = f.x;
-      if (typeof x === 'function') return x(evArgs(argn, a));
+      if (typeof x === 'function') {
+        const args = new Array(n);
+        for (let i = 0; i < n; i++) args[i] = argn[i](a, false);
+        return x(args);
+      }
       if (f.a === LIT && f.d instanceof Pair) {
         const tag = f.d.a;
         if (tag === MAC) return comp(expandCached(e, f))(a, t);
         if (tag === CLO) {
-          const args = evArgs(argn, a);
+          const args = new Array(n);
+          for (let i = 0; i < n; i++) args[i] = argn[i](a, false);
           const r = f.d.d;
           const env = bind(r.d.a, args, r.a);
           const body = comp(r.d.d.a);
           if (t) { TC.env = env; TC.node = body; return TC; }
-          return run(body, env);
+          let v = body(env, true);
+          while (v === TC) {
+            const nb = TC.node, ne = TC.env;
+            v = nb(ne, true);
+          }
+          return v;
         }
       }
     }

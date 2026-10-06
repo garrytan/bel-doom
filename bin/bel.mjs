@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // Bel command line: node bin/bel.mjs [-e EXPR]... [file.bel]...   (no args: REPL)
+import './bigstack.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
