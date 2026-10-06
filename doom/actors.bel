@@ -153,12 +153,14 @@
                            (enter m 'dead))))
              (cons w m))))
 
-; Sight: in range, with no wall in between.
+; Sight: in range, from the monster's eyes to ours, with no wall in between.
 (def sees-player (w m)
   (and (> (at 'health w) 0)
        (< (abs (- (at 'x m) (at 'px w))) 1500)
        (< (abs (- (at 'y m) (at 'py w))) 1500)
-       (clear-line (at 'grid (at 'lv w)) (at 'heights w) (at 'x m) (at 'y m) (at 'px w) (at 'py w))))
+       (clear-line (at 'grid (at 'lv w)) (at 'heights w)
+                   (at 'x m) (at 'y m) (+ (car (nth (+ (at 'sec m) 1) (at 'heights w))) 42)
+                   (at 'px w) (at 'py w) (eye-z w))))
 
 ; Like Doom's monsters, a sleeping one only notices us in front of it,
 ; unless we are close.
@@ -274,7 +276,9 @@
   (let m (enter (puts m 'solid nil 'shootable nil) 'die)
     (if (at 'info m)
         (cons (monster-sound w m 3) m)
-        (cons (puts (sound w "DSBAREXP") 'blasts (cons (list (at 'x m) (at 'y m)) (at 'blasts w)))
+        (cons (puts (sound w "DSBAREXP")
+                    'blasts (cons (list (at 'x m) (at 'y m) (+ (car (nth (+ (at 'sec m) 1) (at 'heights w))) 16))
+                                  (at 'blasts w)))
               (puts m 'sprite "BEXP" 'frames "ABCDE" 'bright t 'frame \A 'state 'die)))))
 
 ; Damage the mobj with this id.
@@ -287,16 +291,23 @@
                         (at 'mobjs w))
     (puts w2 'mobjs (rev ms))))
 
-; A barrel blast hurts everything within 128 units, the player included.
-; Barrels it sets off blast on the next tic.
+; A barrel blast hurts everything within 128 units that it can see, the
+; player included.  Barrels it sets off blast on the next tic.
 (def run-blasts (w)
-  (foldl (fn ((bx by) w)
-           (withs (d  (dist bx by (at 'px w) (at 'py w))
-                   w  (if (< d 128) (hurt-player w (floor (- 128 d))) w))
+  (foldl (fn ((bx by bz) w)
+           (withs (g  (at 'grid (at 'lv w))
+                   d  (dist bx by (at 'px w) (at 'py w))
+                   w  (if (and (< d 128) (clear-line g (at 'heights w) bx by bz (at 'px w) (at 'py w) (eye-z w)))
+                          (hurt-player w (floor (- 128 d)))
+                          w))
              (foldl (fn (m w)
                       (if (at 'shootable m)
                           (let d (dist bx by (at 'x m) (at 'y m))
-                            (if (< d 128) (damage-id w (at 'id m) (floor (- 128 d))) w))
+                            (if (and (< d 128)
+                                     (clear-line g (at 'heights w) bx by bz (at 'x m) (at 'y m)
+                                                 (+ (car (nth (+ (at 'sec m) 1) (at 'heights w))) 28)))
+                                (damage-id w (at 'id m) (floor (- 128 d)))
+                                w))
                           w))
                     w
                     (at 'mobjs w))))

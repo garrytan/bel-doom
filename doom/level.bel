@@ -138,27 +138,31 @@
 (def lines-near (g x y)
   (nth (+ 1 (grid-col g x)) (nth (+ 1 (grid-row g y)) (nth 5 g))))
 
-; Is the straight line between two points free of walls and closed doors?
-; Only the lines in grid cells along the way can be in the way: sampling
-; every 64 units keeps every point of the line within 32 units of a sample,
-; and each cell lists the lines within 32 units of it.
-(def clear-line (g heights ax ay bx by)
+; Can an eye at (ax, ay, az) see the point (bx, by, bz)?  Only the lines in
+; grid cells along the way can be in the way: sampling every 64 units keeps
+; every point of the line within 32 units of a sample, and each cell lists
+; the lines within 32 units of it.
+(def clear-line (g heights ax ay az bx by bz)
   (withs (dx (- bx ax)
           dy (- by ay)
           n  (+ 1 (ceil (/ (max (abs dx) (abs dy)) 64))))
     (no (some (fn (i)
-                (some [blocks-sight _ heights ax ay bx by dx dy]
+                (some [blocks-sight _ heights ax ay az bx by bz dx dy]
                       (lines-near g (+ ax (/ (* i dx) n)) (+ ay (/ (* i dy) n)))))
               (iota (+ n 1))))))
 
-(def blocks-sight (ln heights ax ay bx by dx dy)
-  (let (x1 y1 x2 y2 front back . rest) ln
-    (and (or (no back)
-             (let ((ff fc) (bf bc)) (list (nth (+ front 1) heights) (nth (+ back 1) heights))
-               (<= (min fc bc) (max ff bf))))
-         (< (* (- (* dx (- y1 ay)) (* dy (- x1 ax)))
+; A line crossed by the sight line blocks it if it is a wall, or if the
+; sight line passes it below the higher floor or above the lower ceiling
+; of the two sectors it divides, as in Doom's P_CheckSight.
+(def blocks-sight (ln heights ax ay az bx by bz dx dy)
+  (withs ((x1 y1 x2 y2 front back . rest) ln
+          da (- (* (- x2 x1) (- ay y1)) (* (- y2 y1) (- ax x1)))
+          db (- (* (- x2 x1) (- by y1)) (* (- y2 y1) (- bx x1))))
+    (and (< (* (- (* dx (- y1 ay)) (* dy (- x1 ax)))
                (- (* dx (- y2 ay)) (* dy (- x2 ax))))
             0)
-         (< (* (- (* (- x2 x1) (- ay y1)) (* (- y2 y1) (- ax x1)))
-               (- (* (- x2 x1) (- by y1)) (* (- y2 y1) (- bx x1))))
-            0))))
+         (< (* da db) 0)
+         (or (no back)
+             (let ((ff fc) (bf bc)) (list (nth (+ front 1) heights) (nth (+ back 1) heights))
+               (let z (+ az (* (/ da (- da db)) (- bz az)))
+                 (or (<= z (max ff bf)) (>= z (min fc bc)))))))))

@@ -135,7 +135,9 @@
                                         l  (- (* dx s) (* dy c)))
                                   (if (and (at 'shootable m) (> z 0) (< z best)
                                            (< (abs l) (+ (at 'radius m) (* z 0.06)))
-                                           (clear-line (at 'grid lv) (at 'heights w) px py (at 'x m) (at 'y m)))
+                                           (clear-line (at 'grid lv) (at 'heights w) px py (eye-z w)
+                                                       (at 'x m) (at 'y m)
+                                                       (+ (car (nth (+ (at 'sec m) 1) (at 'heights w))) 28)))
                                       (list z m)
                                       (list best target))))
                               (list 4096 nil)
@@ -231,10 +233,10 @@
   (let (sec slot target speed wait back) m
     (let cur (nth (+ slot 1) (nth (+ sec 1) (at 'heights w)))
       (if (no (= cur target))
-          (cons (set-height w sec slot (if (< cur target)
-                                           (min target (+ cur speed))
-                                           (max target (- cur speed))))
-                m)
+          (let h (if (< cur target) (min target (+ cur speed)) (max target (- cur speed)))
+            (if (and (= slot 1) (< h cur) (door-blocked w sec h))
+                (cons (sound w "DSDOROPN") (list sec 1 (- (lowest-ceiling w sec) 4) speed 105 target))
+                (cons (set-height w sec slot h) m)))
           (and wait (> wait 0))
           (cons w (list sec slot target speed (- wait 1) back))
           back
@@ -243,6 +245,23 @@
               (cons (sound w (if (= slot 1) "DSDORCLS" "DSPSTOP"))
                     (list sec slot back speed nil nil)))
           (cons w nil)))))
+
+; As in Doom, a closing door that would come down on the player or a
+; monster goes back up instead.
+(def door-blocked (w sec h)
+  (and (< (- h (car (nth (+ sec 1) (at 'heights w)))) 56)
+       (or (and (> (at 'health w) 0) (overlaps-sector w (at 'px w) (at 'py w) player-radius sec))
+           (some [and (at 'solid _)
+                      (in (at 'state _) 'chase 'attack 'pain)
+                      (overlaps-sector w (at 'x _) (at 'y _) (at 'radius _) sec)]
+                 (at 'mobjs w)))))
+
+; Does a body of radius r at (x, y) reach into the sector?  Test its centre
+; and the corners of its box.
+(def overlaps-sector (w x y r sec)
+  (let root (at 'root (at 'lv w))
+    (some [= (point-sector root (+ x (car _)) (+ y (cadr _))) sec]
+          (list (list 0 0) (list r r) (list r (- r)) (list (- r) r) (list (- r) (- r))))))
 
 (def set-height (w sec slot h)
   (let heights (at 'heights w)
