@@ -20,11 +20,12 @@ class Sym {
     this.lit = false;    // t nil o apply
     this.sf = 0;         // special form code
     this.nat = false;    // core macro evaluated natively while true
+    this.cnode = null;   // compiled reference node
   }
 }
 
 class Pair {
-  constructor(a, d) { this.a = a; this.d = d; this.x = null; }
+  constructor(a, d) { this.a = a; this.d = d; this.x = null; this.c = null; }
 }
 
 class Char {
@@ -307,6 +308,19 @@ function bind(parms, args, env) {
 }
 
 function pass(pat, arg, env) {
+  // fast path: a proper list of plain variables destructuring a list of the same length
+  if (pat instanceof Pair && arg instanceof Pair) {
+    let p = pat, q = arg, e2 = env;
+    while (p instanceof Pair && q instanceof Pair) {
+      const v = p.a;
+      if (!(v instanceof Sym) || v.lit) break;
+      v.lexb = true;
+      e2 = new Pair(new Pair(v, q.a), e2);
+      p = p.d;
+      q = q.d;
+    }
+    if (p === NIL && q === NIL) return e2;
+  }
   if (pat === NIL) {
     if (arg !== NIL) return sigerr(sym('overargs'));
     return env;
@@ -667,6 +681,7 @@ function ev(e, a, w) {
           const r = f.d.d;
           a = bind(r.d.a, args, r.a);
           e = r.d.d.a;
+          if (COMPILE && !w) return run(comp(e), a);
           break;
         }
         if (tag === MAC) {
@@ -726,7 +741,8 @@ function applyF(f, args) {
       }
       if (tag === CLO) {
         const r = f.d.d;
-        return ev(r.d.d.a, bind(r.d.a, args, r.a), false);
+        const env = bind(r.d.a, args, r.a);
+        return COMPILE ? run(comp(r.d.d.a), env) : ev(r.d.d.a, env, false);
       }
       if (tag === MAC) {
         return ev(applyF(f.d.d.a, args.map((x) => list(QUOTE, x))), NIL, false);
@@ -875,6 +891,370 @@ function globeList() {
   let r = NIL;
   for (const s of symtab.values()) if (s.gcell) r = new Pair(s.gcell, r);
   return r;
+}
+
+
+// ---------------------------------------------------------------- compiler
+//
+// Closure compilation of the same semantics as ev, for value context.  Each
+// code pair is compiled once into a JS function node(a, t) where a is the
+// Bel environment (an alist) and t says the node is in tail position; a call
+// to a closure in tail position returns the TC marker instead of growing the
+// JS stack, and run() trampolines it.  Anything unusual (where-mode, dyn,
+// after, ccc, def, mac) is delegated to ev, so the two agree by construction.
+
+const COMPILE = !(typeof process !== 'undefined' && process.env && process.env.BEL_NOCOMPILE);
+const TC = { env: null, node: null };
+
+function run(node, env) {
+  let r = node(env, true);
+  while (r === TC) {
+    const n = TC.node, e = TC.env;
+    r = n(e, true);
+  }
+  return r;
+}
+
+function comp(e) {
+  if (e instanceof Sym) return e.cnode || (e.cnode = compSym(e));
+  if (!(e instanceof Pair)) return () => e;
+  if (e.c !== null) return e.c;
+  e.c = (a, t) => e.c === null ? ev(e, a, 0) : ev(e, a, 0);  // placeholder while compiling
+  const n = compPair(e);
+  e.c = n;
+  return n;
+}
+
+function compSym(s) {
+  if (s.lit) return () => s;
+  return (a) => {
+    if (s.dynb) {
+      for (let i = dyn.length - 1; i >= 0; i--) if (dyn[i].a === s) return dyn[i].d;
+    }
+    if (s.lexb) {
+      for (let p = a; p instanceof Pair; p = p.d) if (p.a.a === s) return p.a.d;
+    }
+    const c = s.gcell;
+    if (c !== null) return c.d;
+    return ev(s, a, 0);
+  };
+}
+
+function compSeq(body) {
+  const ns = listToArr(body).map(comp);
+  if (ns.length === 0) return () => NIL;
+  if (ns.length === 1) return ns[0];
+  if (ns.length === 2) {
+    const [n0, n1] = ns;
+    return (a, t) => { n0(a, false); return n1(a, t); };
+  }
+  const last = ns.pop();
+  return (a, t) => {
+    for (let i = 0; i < ns.length; i++) ns[i](a, false);
+    return last(a, t);
+  };
+}
+
+function compArgs(es) {
+  return listToArr(es).map(comp);
+}
+
+function evArgs(argn, a) {
+  const n = argn.length;
+  const args = new Array(n);
+  for (let i = 0; i < n; i++) args[i] = argn[i](a, false);
+  return args;
+}
+
+function applyT(f, args, t) {
+  for (;;) {
+    if (f instanceof Pair) {
+      const x = f.x;
+      if (typeof x === 'function') return x(args);
+      if (f.a === LIT && f.d instanceof Pair && f.d.a === CLO) {
+        const r = f.d.d;
+        const env = bind(r.d.a, args, r.a);
+        const body = comp(r.d.d.a);
+        if (t) { TC.env = env; TC.node = body; return TC; }
+        return run(body, env);
+      }
+      return applyF(f, args);
+    }
+    if (f === APPLY) {
+      if (args.length === 0) return sigerr(sym('cannot-apply'));
+      const rest = args.slice(1);
+      f = args[0];
+      if (rest.length === 0) { args = []; continue; }
+      const last = rest.pop();
+      args = rest.concat(listToArr(last));
+      continue;
+    }
+    return applyF(f, args);
+  }
+}
+
+function expandCached(e, f) {
+  const mc = e.x;
+  if (mc instanceof MacroCache && mc.m === f) return mc.exp;
+  const exp = applyF(f.d.d.a, listToArr(e.d));
+  e.x = new MacroCache(f, exp);
+  return exp;
+}
+
+function compCall(e) {
+  const op = e.a;
+  const opn = comp(op);
+  const argn = compArgs(e.d);
+  const gsym = op instanceof Sym && !op.lit ? op : null;
+  return (a, t) => {
+    let f;
+    if (gsym !== null && !gsym.lexb && !gsym.dynb && gsym.gcell !== null) f = gsym.gcell.d;
+    else f = opn(a, false);
+    if (f instanceof Pair) {
+      const x = f.x;
+      if (typeof x === 'function') return x(evArgs(argn, a));
+      if (f.a === LIT && f.d instanceof Pair) {
+        const tag = f.d.a;
+        if (tag === MAC) return comp(expandCached(e, f))(a, t);
+        if (tag === CLO) {
+          const args = evArgs(argn, a);
+          const r = f.d.d;
+          const env = bind(r.d.a, args, r.a);
+          const body = comp(r.d.d.a);
+          if (t) { TC.env = env; TC.node = body; return TC; }
+          return run(body, env);
+        }
+      }
+    }
+    return applyT(f, evArgs(argn, a), t);
+  };
+}
+
+function guarded(op, fast, e) {
+  let gen = null;
+  return (a, t) => {
+    if (op.nat && !shadowed(op, a)) return fast(a, t);
+    if (gen === null) gen = compCall(e);
+    return gen(a, t);
+  };
+}
+
+function compPair(e) {
+  const op = e.a;
+  if (op instanceof Sym) {
+    const sf = op.sf;
+    if (sf === 0) return compCall(e);
+    switch (sf) {
+      case SF_QUOTE: { const v = e.d.a; return () => v; }
+      case SF_LIT: return () => e;
+      case SF_IF: return compIf(e);
+      case SF_BQUOTE: { const x = e.d.a; return (a) => qq(x, a, 0); }
+      case SF_WHERE: case SF_DYN: case SF_AFTER: case SF_CCC: case SF_THREAD:
+        return (a) => ev(e, a, 0);
+    }
+    const fast = compCore(e, sf);
+    return guarded(op, fast, e);
+  }
+  if (op === VMARK && VMARK !== undefined) {
+    return (a) => {
+      const c = lookupPair(e, a);
+      if (c === null) return sigerr(sym('unbound'));
+      return c.d;
+    };
+  }
+  if (op instanceof Char) return () => e;
+  if (op instanceof Pair && op.a === FN) {
+    const parms = op.d.a;
+    const body = comp(fnBody(op));
+    const argn = compArgs(e.d);
+    let gen = null;
+    return (a, t) => {
+      if (FN.nat && !shadowed(FN, a)) return body(bind(parms, evArgs(argn, a), a), t);
+      if (gen === null) gen = compCall(e);
+      return gen(a, t);
+    };
+  }
+  return compCall(e);
+}
+
+function compIf(e) {
+  const parts = listToArr(e.d).map(comp);
+  if (parts.length === 0) return () => NIL;
+  if (parts.length === 1) return parts[0];
+  if (parts.length === 2) {
+    const [c, th] = parts;
+    return (a, t) => (c(a, false) !== NIL ? th(a, t) : NIL);
+  }
+  if (parts.length === 3) {
+    const [c, th, el] = parts;
+    return (a, t) => (c(a, false) !== NIL ? th(a, t) : el(a, t));
+  }
+  return (a, t) => {
+    let i = 0;
+    for (; i + 1 < parts.length; i += 2) if (parts[i](a, false) !== NIL) return parts[i + 1](a, t);
+    return i < parts.length ? parts[i](a, t) : NIL;
+  };
+}
+
+function bindPat(v, val, a) {
+  if (v instanceof Sym && !v.lit) {
+    v.lexb = true;
+    return new Pair(new Pair(v, val), a);
+  }
+  return pass(v, val, a);
+}
+
+function compCore(e, sf) {
+  switch (sf) {
+    case SF_FN: {
+      const parms = e.d.a;
+      const body = fnBody(e);
+      return (a) => makeClo(a, parms, body);
+    }
+    case SF_DO: return compSeq(e.d);
+    case SF_SET: {
+      const items = [];
+      let es = e.d;
+      while (es instanceof Pair) {
+        const p = es.a;
+        let vn;
+        if (es.d === NIL) { vn = () => T; es = NIL; }
+        else { vn = comp(es.d.a); es = es.d.d; }
+        items.push([p, vn]);
+      }
+      return (a) => {
+        let v = T;
+        for (let i = 0; i < items.length; i++) {
+          v = items[i][1](a, false);
+          assign(items[i][0], v, a);
+        }
+        return v;
+      };
+    }
+    case SF_LET: {
+      const parms = e.d.a;
+      const valn = comp(e.d.d.a);
+      const body = compSeq(e.d.d.d);
+      return (a, t) => body(bindPat(parms, valn(a, false), a), t);
+    }
+    case SF_RFN: {
+      const name = e.d.a;
+      const parms = e.d.d.a;
+      const body = fnBody(e.d);
+      return (a) => {
+        const cell = new Pair(name, NIL);
+        if (name instanceof Sym) name.lexb = true;
+        const clo = makeClo(new Pair(cell, a), parms, body);
+        cell.d = clo;
+        return clo;
+      };
+    }
+    case SF_WHEN:
+    case SF_UNLESS: {
+      const c = comp(e.d.a);
+      const body = compSeq(e.d.d);
+      const want = sf === SF_WHEN;
+      return (a, t) => ((c(a, false) !== NIL) === want ? body(a, t) : NIL);
+    }
+    case SF_AND: {
+      const ns = listToArr(e.d).map(comp);
+      if (ns.length === 0) return () => T;
+      const last = ns.pop();
+      return (a, t) => {
+        for (let i = 0; i < ns.length; i++) if (ns[i](a, false) === NIL) return NIL;
+        return last(a, t);
+      };
+    }
+    case SF_OR: {
+      const ns = listToArr(e.d).map(comp);
+      if (ns.length === 0) return () => NIL;
+      const last = ns.pop();
+      return (a, t) => {
+        for (let i = 0; i < ns.length; i++) {
+          const v = ns[i](a, false);
+          if (v !== NIL) return v;
+        }
+        return last(a, t);
+      };
+    }
+    case SF_CASE: {
+      const vn = comp(e.d.a);
+      const rest = listToArr(e.d.d);
+      const keys = [], ns = [];
+      let dflt = null;
+      for (let i = 0; i < rest.length; i += 2) {
+        if (i + 1 >= rest.length) dflt = comp(rest[i]);
+        else { keys.push(rest[i]); ns.push(comp(rest[i + 1])); }
+      }
+      return (a, t) => {
+        const v = vn(a, false);
+        for (let i = 0; i < keys.length; i++) if (equal(v, keys[i])) return ns[i](a, t);
+        return dflt === null ? NIL : dflt(a, t);
+      };
+    }
+    case SF_WITH:
+    case SF_WITHS: {
+      const vars = [], vals = [];
+      for (let p = e.d.a; p instanceof Pair; p = p.d.d) {
+        vars.push(p.a);
+        vals.push(comp(p.d instanceof Pair ? p.d.a : NIL));
+      }
+      const body = compSeq(e.d.d);
+      if (sf === SF_WITHS) {
+        return (a, t) => {
+          for (let i = 0; i < vars.length; i++) a = bindPat(vars[i], vals[i](a, false), a);
+          return body(a, t);
+        };
+      }
+      return (a, t) => {
+        const vs = new Array(vars.length);
+        for (let i = 0; i < vars.length; i++) vs[i] = vals[i](a, false);
+        for (let i = 0; i < vars.length; i++) a = bindPat(vars[i], vs[i], a);
+        return body(a, t);
+      };
+    }
+    case SF_FOR: {
+      const v = e.d.a;
+      const initn = comp(e.d.d.a);
+      const maxn = comp(e.d.d.d.a);
+      const body = listToArr(e.d.d.d.d).map(comp);
+      return (a) => {
+        let i = initn(a, false);
+        const mx = maxn(a, false);
+        if (v instanceof Sym) v.lexb = true;
+        while (!less(mx, i)) {
+          const cell = new Pair(v, i);
+          const a2 = new Pair(cell, a);
+          for (let k = 0; k < body.length; k++) body[k](a2, false);
+          i = num(cell.d) + 1;
+        }
+        return NIL;
+      };
+    }
+    case SF_REPEAT: {
+      const nn = comp(e.d.a);
+      const body = listToArr(e.d.d).map(comp);
+      return (a) => {
+        const n = nn(a, false);
+        for (let i = 1; !less(n, i); i++) {
+          for (let k = 0; k < body.length; k++) body[k](a, false);
+        }
+        return NIL;
+      };
+    }
+    case SF_WHILE: {
+      const test = comp(e.d.a);
+      const body = listToArr(e.d.d).map(comp);
+      return (a) => {
+        while (test(a, false) !== NIL) {
+          for (let k = 0; k < body.length; k++) body[k](a, false);
+        }
+        return NIL;
+      };
+    }
+    default:
+      return (a) => ev(e, a, 0);
+  }
 }
 
 // ---------------------------------------------------------------- reader
