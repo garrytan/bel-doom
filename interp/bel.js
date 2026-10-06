@@ -1114,7 +1114,10 @@ function bindPat(v, val, a) {
     v.lexb = true;
     return new Pair(new Pair(v, val), a);
   }
-  return pass(v, val, a);
+  errContext = v;
+  const r = pass(v, val, a);
+  errContext = null;
+  return r;
 }
 
 function compCore(e, sf) {
