@@ -333,6 +333,10 @@ function pass(pat, arg, env) {
       q = q.d;
     }
     if (p === NIL && q === NIL) return e2;
+    if (p instanceof Sym && !p.lit && (q === NIL || q instanceof Pair)) {
+      p.lexb = true;
+      return new Pair(new Pair(p, q), e2);
+    }
   }
   if (pat === NIL) {
     if (arg !== NIL) return sigerr(sym('overargs'));
