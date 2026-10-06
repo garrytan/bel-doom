@@ -56,3 +56,4 @@ for (const [src, want] of session) {
   else console.log('FAIL', src, '\n  got ', got, '\n  want', want);
 }
 console.log(`${pass}/${session.length} belexamples.txt results match`);
+if (pass !== session.length) process.exit(1);

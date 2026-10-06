@@ -285,10 +285,11 @@ function bindVar(v, val, env) {
 function bind(parms, args, env) {
   let p = parms, i = 0;
   const n = args.length;
+  const env0 = env;
   while (p instanceof Pair) {
     const v = p.a;
     if (i >= n || !(v instanceof Sym) || v.lit) {
-      return pass(parms, arrToList(args), env);
+      return pass(parms, arrToList(args), env0);
     }
     v.lexb = true;
     env = new Pair(new Pair(v, args[i++]), env);
@@ -335,6 +336,12 @@ function pass(pat, arg, env) {
 }
 
 // ---------------------------------------------------------------- evaluator
+
+function shadowed(s, a) {
+  // a native core macro is only used when the symbol is not lexically or dynamically rebound
+  if (!s.lexb && !s.dynb) return false;
+  return lookup(s, a) !== s.gcell;
+}
 
 function unfindable() { return sigerr(sym('unfindable')); }
 
@@ -394,7 +401,7 @@ function ev(e, a, w) {
     const op = e.a;
     if (op instanceof Sym) {
       const sf = op.sf;
-      if (sf !== 0 && (sf < SF_FN || op.nat)) {
+      if (sf !== 0 && (sf < SF_FN || (op.nat && !shadowed(op, a)))) {
         switch (sf) {
           case SF_QUOTE:
             return w ? unfindable() : e.d.a;
@@ -618,7 +625,7 @@ function ev(e, a, w) {
     }
 
     // direct application of a lambda: ((fn parms . body) args...)
-    if (op instanceof Pair && op.a === FN && FN.nat) {
+    if (op instanceof Pair && op.a === FN && FN.nat && !shadowed(FN, a)) {
       const args = evalArgs(e.d, a);
       a = bind(op.d.a, args, a);
       e = fnBody(op);
@@ -1160,7 +1167,7 @@ function peekChar(s) {
 
 function enq(c, q) {
   // q = (list-of-items); append c at the end
-  if (q.a === NIL) { q.a = new Pair(c, NIL); return; }
+  if (q.a === NIL) { q.a = new Pair(c, NIL); q.x = q.a; return; }
   let p = q.a;
   if (!(q.x instanceof Pair) || q.x.d !== NIL) {
     while (p.d instanceof Pair) p = p.d;
@@ -1212,8 +1219,13 @@ function nth(n, xs) {
 }
 
 function locNth(args) {
+  const n = args[0];
+  if (!Number.isInteger(n) || n < 1) return sigerr(sym('mistype'));
   let p = args[1];
-  for (let i = 1; i < args[0]; i++) p = p.d;
+  for (let i = 1; i < n; i++) {
+    if (!(p instanceof Pair)) return sigerr(sym('mistype'));
+    p = p.d;
+  }
   if (!(p instanceof Pair)) return sigerr(sym('mistype'));
   return list(p, A);
 }
@@ -1709,7 +1721,18 @@ jet('charn', (a) => {
   if (!(a[0] instanceof Char)) return sigerr(sym('mistype'));
   return a[0].c;
 });
-jet('nchar', (a) => chr(num(a[0])));
+jet('nchar', (a) => {
+  const n = num(a[0]);
+  if (!Number.isInteger(n) || n < 0 || n > 0x10ffff) return sigerr(sym('mistype'));
+  return chr(n);
+});
+jet('inv', (a) => -num(a[0]));
+jet('recip', (a) => {
+  if (num(a[0]) === 0) return sigerr(sym('mistype'));
+  return 1 / a[0];
+});
+jet('rpart', (a) => num(a[0]));
+jet('ipart', (a) => (num(a[0]), 0));
 
 // I/O
 jet('prc', (a) => prc(a[0], outStream(a, 1)));

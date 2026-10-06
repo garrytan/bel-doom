@@ -86,6 +86,14 @@ const cases = [
   ['(let x (list 1 2) (pop (cdr x)) x)', '(1)'],
   ['(til x (pop q) (no x) (push x r))', null],
   ['(string "abc")', 't'],
+  ['((fn (x (o y x)) (len scope)) 1)', '2'],
+  ['(let fn (fn args 42) (fn 3))', '42'],
+  ['(onerr \'bad (let xs (list 1 2) (set (nth 0 xs) 99)))', 'bad'],
+  ['(onerr \'bad (let xs (list 1 2) (set (nth 1.5 xs) 99)))', 'bad'],
+  ['(onerr \'bad (let xs (list 1 2) (set (nth 9 xs) 99)))', 'bad'],
+  ['(onerr \'bad (nchar -1))', 'bad'],
+  ['(let q (newq) (bind outs q (prc \\a) (prc \\b)) (rdc q) (rdc q) (bind outs q (prc \\c) (prc \\d)) (car q))', '"cd"'],
+  ['(list (inv 2) (recip 4))', '(-2 0.25)'],
   ['(let r nil (for i 1 3 (push (fn () i) r)) (map [_] r))', '(3 2 1)'],
   ['(let r nil (for i 1 10 (push i r) (set i (+ i 1))) r)', '(9 7 5 3 1)'],
   ['(let (r q) (list nil \'(1 2 3)) (til x (pop q) (no x) (push x r)) r)', '(3 2 1)'],
@@ -110,3 +118,4 @@ for (const [src, want] of cases) {
   if (want !== null && got !== want) { fail++; console.log('FAIL', src, '=>', got, 'want', want); }
 }
 console.log(`${cases.length - fail}/${cases.length} passed`);
+if (fail) process.exit(1);
