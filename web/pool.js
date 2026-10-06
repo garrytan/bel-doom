@@ -47,7 +47,12 @@ export function createPool({ count, auto = false, start, paused: startPaused = f
 
   function ready(w, m) {
     w.init = m;
-    if (!workers.every((x) => x.init)) return;
+    begin();
+  }
+
+  // Starts the game once every remaining worker has booted (also after a worker fails during boot).
+  function begin() {
+    if (info || !workers.every((x) => x.init)) return;
     info = workers[0].init;
     if (workers.length > 1 && (!info.split || (auto && !info.sliceApi))) {
       on.note(!info.split ? 'engine has no doom-tick: one worker' : 'engine has no doom-draw-slice: one worker');
@@ -68,12 +73,14 @@ export function createPool({ count, auto = false, start, paused: startPaused = f
   function fallback(reason, survivor) {
     on.note(`${reason}; continuing with one worker`);
     shrinkTo(survivor);
+    if (!info) return begin();
     schedule(0);
   }
 
   function workerFailed(w, text) {
-    if (stopped) return;
-    if (workers.length > 1) return fallback(`worker ${w.index}: ${text.split('\n')[0]}`, workers.find((x) => x !== w));
+    if (stopped || !workers.includes(w)) return;
+    const others = workers.filter((x) => x !== w);
+    if (workers.length > 1) return fallback(`worker ${w.index}: ${text.split('\n')[0]}`, others.find((x) => x.init) || others[0]);
     stopped = true;
     on.error(text);
   }
