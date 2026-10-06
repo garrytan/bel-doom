@@ -1,111 +1,217 @@
-# Doom, written in Paul Graham's Bel
+# Doom, in Paul Graham's Bel
 
-This repository runs Doom in [Bel](https://paulgraham.com/bel.html), the Lisp that Paul Graham defined in itself in 2019. It has two parts:
+> I was having dinner with Paul Graham and Tom Brown, cofounder of Anthropic, and we wanted to see if Opus 5.5 could make Doom in Bel. It did it before dessert came: about 25 minutes.
+>
+> — Garry Tan
 
-- **A Bel interpreter** (`interp/bel.js`, JavaScript, runs in Node and in browsers). It loads PG's `bel.bel` unmodified, so every definition in the spec exists exactly as he wrote it, and then makes the hot paths fast.
-- **A Doom engine written in Bel** (`doom/*.bel`, about 1,700 lines). It reads Freedoom's E1M1 from a WAD file, walks the BSP tree, and draws textured walls, floors, sky, sprites and the status bar. Monsters, weapons, doors, lifts, pickups and sound events are all Bel too.
-- **Written functionally**, in the style of `bel.bel` and *ANSI Common Lisp*: no assignment, no mutation, no loops. The whole game is one value, the world. `(step world keys)` returns the next world and `(render world)` returns the frame as a list of columns, both pure functions built from recursion, `map`, `foldl` and destructuring. The only side effects are reading the WAD and writing each finished frame. Even randomness is pure: Doom's own 256-entry table, indexed by a number carried in the world, as in the original `P_Random`.
+![Doom running in Bel: imps, a shotgun guy and the pistol on Freedoom's E1M1](docs/demo.gif)
 
-The host programs are the "VGA card, sound card and keyboard". They turn the palette indices Bel writes into pixels, play the sound samples Bel names, and pass in the keys being held. No game logic lives outside Bel.
+**[Play it in your browser](https://garrytan.github.io/bel-doom/)** · [How the engine works](#doom-as-a-pure-function) · [How the interpreter works](docs/interpreter.md) · [The 25 minutes](#the-25-minutes)
 
-![E1M1 in Bel](docs/e1m1.png)
+In 2019 Paul Graham published [Bel](https://paulgraham.com/bel.html), a Lisp defined in itself: 1,800 lines of Bel that specify everything from `car` to the reader, the printer and the numbers. He was clear about what it was not:
 
-## Play it
+> This is not a language you can use to program computers, just as the Lisp in the 1960 paper wasn't. Mainly because, like McCarthy's Lisp, it is not at all concerned with efficiency.
 
-```sh
-node bin/serve.mjs 8080        # then open http://localhost:8080  (add ?hires=1 for 320x200)
-node bin/doom-live.mjs --script-file bin/demo-route.txt --out live.mp4   # record the page in real time
-bin/make-demos.sh              # both videos from bin/demo-route.txt (regenerate it with node bin/demo-bot.mjs)
-node bin/doom-term.mjs         # in a terminal, with truecolor half-block pixels
-node bin/doom-record.mjs --mp4 demo.mp4 --gif demo.gif   # scripted run to video, with sound
+He meant it. In Bel, numbers are built from lists, and the integers in them are unary. Here is two thirds:
+
+```lisp
+(lit num (+ (t t) (t t t)) (+ () (t)))
 ```
 
-Keys: arrows or WASD to move and turn, Q/E or Alt+arrows to strafe, Shift to run, Ctrl or F to fire, Space or U to use, M to mute, Esc to pause.
+So `(+ 2 2)` appends two lists of `t`. There is no floating point, no trig, no vector type (Bel's arrays are lists too), and no way to draw a pixel except writing bits to a stream.
 
-A Bel REPL and script runner:
+This repository runs Doom in it. It plays Freedoom's E1M1 with BSP rendering, textured walls, floors and sky, light levels, sprites, zombiemen, imps and demons that see you, chase you and shoot back, the pistol, exploding barrels, doors, lifts, pickups, the status bar with Doomguy's face, and sound. The game is about 1,760 lines of Bel, running on Paul Graham's unmodified `bel.bel`. The Bel is purely functional: there is no assignment and there are no loops anywhere in the engine.
 
-```sh
-node bin/bel.mjs                         # REPL
-node bin/bel.mjs -e '(map [* _ _] (list 1 2 3))'
-node bin/bel.mjs file.bel
+## Doom as a pure function
+
+The whole game is one value, the world. The host calls one function per tic, 35 times a second:
+
+```lisp
+(def doom-frame (w (o keys ""))
+  (let w2 (step w keys)
+    (if (at 'sounds w2)
+        (pr (apply append (map [append "S" _ (list (nchar 10))] (rev (at 'sounds w2))))))
+    (prc \F)
+    (apply pr (render w2))
+    w2))
 ```
 
-## What the engine does
+`step` is the game and `render` is the picture. Both are pure functions:
 
-Everything in this list is Bel code in `doom/`:
+```lisp
+(def step (w keys)
+  (update-hud
+    (run-actors
+      (run-movers
+        (player-tic (puts w 'tic (+ 1 (at 'tic w)) 'sounds nil 'blasts nil) keys)))))
+```
 
-| File | What it does |
+Every monster is a function from the world and a thing to a new world and a new thing, folded over the list of things:
+
+```lisp
+(def run-actors (w)
+  (let (w2 . ms) (foldl (fn (m (w . acc))
+                          (if (or (at 'info m) (in (at 'state m) 'anim 'die))
+                              (let (w3 . m2) (think w m)
+                                (cons w3 (if m2 (cons m2 acc) acc)))
+                              (cons w (cons m acc))))
+                        (cons w nil)
+                        (at 'mobjs w))
+    (run-blasts (puts w2 'mobjs (rev ms)))))
+```
+
+The renderer is Doom's: a front-to-back walk of the level's BSP tree, drawing each wall segment's columns between per-column clip bounds, with the clip state folded through the walk instead of mutated:
+
+```lisp
+(def render-node (n v st)
+  (if (>= (caddr st) screen-w)
+      st
+      (= (car n) 'sub)
+      (foldl (fn (sg st) (render-seg sg v st)) st (cadr n))
+      (let ((tag x y dx dy rbox lbox right left) (px py . rest)) (list n v)
+        (if (> (* dy (- px x)) (* dx (- py y)))
+            (let st (render-node right v st)
+              (if (box-visible lbox v (cadr st)) (render-node left v st) st))
+            (let st (render-node left v st)
+              (if (box-visible rbox v (cadr st)) (render-node right v st) st))))))
+```
+
+Even randomness is pure. Doom's `P_Random` reads from a fixed table of 256 bytes; here the table is a Bel list and the index travels inside the world, so the same keys always produce the same game. The only side effects in the program are reading the WAD file at startup and printing each finished frame.
+
+`node tools/lint-idiom.mjs` checks this. It flags any `set`, `xar`, `push`, loop macro, `coin`/`rand`, or square-bracket function without `_` outside top-level definitions, and the engine passes with zero findings.
+
+### What the engine does
+
+| File | Lines | What it does |
+|---|---|---|
+| [`main.bel`](doom/main.bel) | 108 | entry points, screen constants, building the world |
+| [`math.bel`](doom/math.bel) | 109 | sine, cosine, square root and arctangent from Taylor series and Newton's method, Doom's random table, property-list helpers |
+| [`wad.bel`](doom/wad.bel) | 170 | WAD directory, palette, COLORMAP, composing wall textures from TEXTURE1/PNAMES patches, flats, sprites |
+| [`level.bel`](doom/level.bel) | 168 | vertexes, linedefs, sidedefs, sectors, segs, subsectors, BSP nodes, a blockmap, line of sight |
+| [`render.bel`](doom/render.bel) | 502 | the BSP renderer: view transform, near-plane clipping, perspective-correct textures with pegging, floors and ceilings, sky, light diminishing, fences and grates, sprites with 8 rotations clipped against walls, the weapon, damage and pickup tints |
+| [`actors.bel`](doom/actors.bel) | 324 | zombieman, shotgun guy, imp and demon (sight, chase, attack, pain, death) and barrels with chain explosions |
+| [`hires.bel`](doom/hires.bel) | 7 | screen constants for 320x200, loaded before `doom-init` when `?hires=1` |
+| [`game.bel`](doom/game.bel) | 375 | movement, collision and stepping, the pistol with autoaim, doors, lifts, switches, walk-over triggers, pickups, status bar and face, death and respawn |
+
+Bel has no arrays, so everything is lists. The frame is a list of 160 columns of 100 palette indices (Doom draws walls in columns too). Textures are lists of circular column lists, so wrapping around a texture costs nothing.
+
+## Making a spec run
+
+PG's `bel.bel` is a specification, and running it is a puzzle of its own: closures are lists, the environment is an association list, macros are first-class and expanded on every call, and the numbers are unary. [`interp/bel.js`](interp/bel.js) is one dependency-free JavaScript file (about 2,400 lines) that runs it in Node and in browsers:
+
+- **It loads `bel.bel` unmodified**, in about 45 ms, so every one of PG's definitions exists exactly as written. On the REPL session in PG's own [`belexamples.txt`](https://paulgraham.com/bel.html), all 37 results match.
+- **Jets.** Then it swaps 87 hot definitions (`map`, `append`, `nth`, `+`, the reader, the printer...) for native functions with the same behavior. The term comes from Urbit, which does the same thing to its own definitional language.
+- **CDR-coding.** Lisp Machines made lists fast by laying them out as vectors. Here, a list that gets indexed repeatedly quietly grows a hidden vector of its cells, so `nth` becomes constant time, and changing the list's structure throws the vector away. This is what makes texture lookups affordable.
+- **A compiler.** Code is compiled once into JavaScript closures, with tail calls trampolined, so Bel loops written as recursion run in constant stack.
+- **Native core macros.** `fn`, `let`, `set`, `for` and friends run natively for as long as they still mean what `bel.bel` says they mean. Redefine one, or bind the name locally, and yours is used.
+
+Everything is real Bel underneath: `(lit clo env parms body)` closures you can take apart with `car`, a `scope` that is a real alist, `where` locations that work through function bodies, `ccc`, `dyn`, `after`, tables, arrays and intrasymbol syntax like `y!a` and `car:cdr`. The full reference is [docs/interpreter.md](docs/interpreter.md).
+
+### Is it really Bel?
+
+Almost. The deliberate differences:
+
+- **Numbers are IEEE doubles**, not unary rationals. Doom needs millions of multiplications a second, and unary multiplication of 320 by 200 builds a list of 64,000 `t`s.
+- **Continuations are escape-only** (enough for `catch`, `onerr` and early exits), and **threads are not supported**.
+- **Macro expansions are memoized per call site**, which assumes a macro's expansion depends only on its arguments. That is true of every macro in `bel.bel`.
+
+That's the whole list. Everything else, including the error behavior, parameter destructuring, optional and type-checked parameters and the way `set` finds places, is `bel.bel`'s own code or behaves identically to it.
+
+## The 25 minutes
+
+Opus 5.5 ran as a small team of agents in [Capy](https://capy.ai): one wrote the interpreter, one wrote the engine, and one wrote the browser, terminal and video front ends. GPT-6 Astra reviewed the plan partway through as an outside critic and found five interpreter bugs, all fixed. From the git log, in Pacific time:
+
+| Time | Minute | |
+|---|---|---|
+| 7:11pm | 0 | "Implement Doom in Paul Graham's Bel" |
+| 7:20 | 9 | The interpreter loads the unmodified `bel.bel` and passes its first tests |
+| 7:24 | 13 | First frames of E1M1 in the browser: textured walls, sky, movement |
+| ~7:34 | 23 | Textured floors, the pistol, the status bar with Doomguy's face, monsters shooting back, sound |
+| 7:42 | 31 | Doors, lifts, barrels and pickups committed |
+| 8:13 | 62 | Rewritten as pure functional Bel after Garry asked for idiomatic Lisp: no side effects, recursion instead of loops |
+| 8:39 | 88 | Line of sight through doorways, door reversal, a reproducible demo route |
+
+The functional rewrite renders the same frames, byte for byte, as the imperative version it replaced (checked on a scripted walk at both resolutions), at about the same speed.
+
+## Numbers
+
+| | |
 |---|---|
-| `main.bel` | Entry points `(doom-init path)` and `(doom-frame world keys)`, screen constants, building the world |
-| `math.bel` | sine, cosine, square root and arctangent, grown from Taylor series and Newton's method, because Bel has no math library |
-| `wad.bel` | WAD directory and lumps, PLAYPAL, COLORMAP, TEXTURE1/PNAMES patch compositing, flats, sprites |
-| `level.bel` | Vertexes, linedefs, sidedefs, sectors, segs, subsectors, BSP nodes, a blockmap-style grid |
-| `render.bel` | Front-to-back BSP renderer: view-space transform, near-plane clipping, per-column clip state folded through the BSP walk, perspective-correct textured walls with pegging, textured floors and ceilings, sky, sector light and distance diminishing via COLORMAP, fake contrast, see-through fences and grates, sprites with 8 rotations clipped against walls, weapon, damage and pickup tints |
-| `actors.bel` | Zombieman, shotgun guy, imp and demon: sight, chase, attack, pain and death states, barrels with chain explosions |
-| `game.bel` | Player movement, collision and stepping, the pistol with bob, flash and hitscan autoaim, doors (1/26/117/31/118), walk-over triggers (2/88), lifts (62/88), switches (23, 11), pickups, status bar numbers and face, death and respawn |
-| `hires.bel` | Constants for 320x200, loaded before `doom-init` |
+| Live in a browser (headless Chromium, 4-core VM, while screen-recording) | 23-26 frames a second at 160x100 |
+| Engine alone in Node | about 41 ms a frame at 160x100, 128 ms at 320x200 |
+| Startup (boot Bel, parse the WAD, compose textures) | about 3.5 s |
+| Engine | 1,763 lines of Bel in 8 files (1,375 without comments and blank lines) |
+| Interpreter | about 2,400 lines of JavaScript, no dependencies |
+| Interpreter tests | 108/108, and 37/37 on `belexamples.txt` |
 
-Bel has no arrays, so the engine is built from lists. The frame protocol is column-major, which matches how Doom draws walls, so each column is a fresh list assembled from the runs of pixels above and below its open rows. Each thinker is a function from the world and a thing to a new world and thing, folded over the thing list. `tools/lint-idiom.mjs` checks the style: it reports any `set`, `xar`, `push`, loop macro, `coin`/`rand`, or a square-bracket function without `_` outside top-level definitions, and the engine passes with zero findings.
+The default is Doom's low-detail mode, 160x100. Add `?hires=1` for the full 320x200.
 
-## What the interpreter does
+## Run it
 
-- **Faithful core.** It implements Bel's primitives (`id join car cdr type xar xdr sym nom wrb rdb ops cls stat coin sys`) and special forms (`quote lit if apply where dyn after ccc`). Closures are real lists of the form `(lit clo env parms body)`, macros are `(lit mac clo)`, and the lexical environment is a real alist, so `scope` works. Lookup goes dynamic, then lexical, then global, as in the spec. `where` locations work through function bodies, so `(set (cadr x) 1)` and `(pop (find pair w))` behave as in the guide.
-- **Loads `bel.bel` unmodified.** That takes about 0.1 s at startup.
-- **Jets.** After loading, 87 hot definitions from `bel.bel` (list functions, arithmetic, I/O, the reader and printer) are replaced by native functions with the same behavior.
-- **Native core macros.** `fn do set def mac let rfn when unless and or case with withs for while repeat` are evaluated natively while their global values are still the ones `bel.bel` defined. If a program redefines or locally rebinds one, the program's version is used.
-- **Closure compiler.** Code is compiled once into JavaScript closures with proper tail calls (trampolined), so Bel loops written as recursion run in constant stack.
-- **CDR-coding cache.** In the spirit of the Lisp Machine, a list that is indexed repeatedly gets a hidden vector of its cells, so `nth` and `drop` become O(1). Changing the list's structure with `xdr` invalidates the vector.
+```sh
+git clone https://github.com/garrytan/bel-doom && cd bel-doom
+node bin/serve.mjs 8080          # open http://localhost:8080
+node bin/doom-term.mjs           # or play in a terminal, with truecolor half-block pixels
+```
 
-### Deliberate differences from the spec
+Keys: arrows or WASD move and turn, Q/E strafe, Shift runs, Ctrl or F fires, Space or U opens doors, M mutes, Esc pauses. The only requirement is Node (tested with Node 24); there is nothing to install.
 
-- Numbers are IEEE doubles instead of exact rationals and complex numbers (`(/ 1 3)` is `0.333…`). Approved for this project.
-- `ccc` continuations are escape-only (they can be called while their extent is live). `thread` is not supported.
-- Macro expansions are memoized per call site. This assumes a macro's expansion depends only on its form, which is true of every macro in `bel.bel`.
-- `(type 1)` is `number`, not `pair`.
+Bel on its own:
 
-## Current results
+```sh
+node bin/bel.mjs                                   # a REPL
+node bin/bel.mjs -e '(map [* _ _] (list 1 2 3))'   # (1 4 9)
+```
 
-| Check | Result |
-|---|---|
-| PG's `belexamples.txt` REPL session (`node test/examples.mjs`) | 37/37 results match (2/3 prints as a float) |
-| Semantics tests (`node test/basics.mjs`) | 108/108 |
-| Functional style (`node tools/lint-idiom.mjs`) | clean |
-| Live in the browser, 160x100 (headless Chromium, 4-core VM, while screen-recording) | 23-26 fps wall-clock over 900-1,175 tic runs, page counter 25-34 fps |
-| Engine only, 160x100, Node | ~40-46 ms per frame (22-25 fps) |
-| Engine only, 320x200, Node | ~128 ms per frame (~8 fps) |
-| Startup (bel.bel, engine, WAD parse, texture compositing) | ~3.7 s |
+Recording:
+
+```sh
+node bin/doom-record.mjs --mp4 demo.mp4 --gif demo.gif     # scripted run, with sound
+bin/make-demos.sh                                          # the demo video and a real-time browser capture
+node bin/demo-bot.mjs                                      # regenerate the scripted route with a bot that plays the game
+```
+
+## How the pieces fit
+
+```mermaid
+flowchart LR
+  keys["keys held"] --> frame["(doom-frame world keys)"]
+  frame --> step["(step world keys)<br/>player, monsters, doors"]
+  step --> render["(render world)<br/>BSP walk, columns of palette indices"]
+  render --> out["prc: F + 16,000 bytes<br/>S + sound names"]
+  out --> host["host: palette to canvas (the VGA DAC)<br/>samples to WebAudio (the sound card)"]
+  frame -- "next world" --> frame
+```
+
+The browser runs the interpreter in a Web Worker. The host's only jobs are the ones hardware did in 1993: turning palette indices into colors, playing the sound samples the game names, and reporting which keys are down. The protocol is in [docs/protocol.md](docs/protocol.md).
+
+```
+interp/   bel.js (the interpreter) and bel.bel (PG's spec, unmodified)
+doom/     the engine, in Bel
+web/      the browser front end
+bin/      Bel CLI, terminal player, recorders, demo bot, static server
+tools/    WAD builders, idiom lint, snapshot tool
+test/     interpreter tests
+wad/      Freedoom E1M1 and the sounds it uses (BSD)
+docs/     interpreter reference, protocol
+```
+
+To rebuild the WADs from Freedoom 0.13.0: `FREEDOOM_WAD=path/to/freedoom1.wad python3 tools/mkwad.py` and the same for `tools/mksounds.py`.
 
 ## Known limits
 
-- One level (E1M1), skill 3. The pistol is the only weapon; shells and other weapons are picked up but do nothing. Imp fireballs hit instantly instead of flying.
-- Monster sight is range, facing and a clear line through the blockmap; there is no REJECT table or sound propagation through sectors (firing wakes monsters within 1,000 units).
-- The blue key is not required, and the exit switch respawns you at the start.
-- The spectre is drawn as an ordinary demon. Barrel chains advance one tic per link.
-- Bel recursion runs on the JavaScript stack. The Node tools start with a 7.8 MB stack; in a browser worker about 1,000 nested non-tail calls fit, so the engine uses tail recursion and `map`/`foldl` for long lists.
-
-## Rebuilding the WADs
-
-`wad/e1m1.wad` and `wad/sounds.wad` are generated from Freedoom 0.13.0 and checked in. To rebuild them, download `freedoom-0.13.0.zip` from the Freedoom releases on GitHub and run:
-
-```sh
-FREEDOOM_WAD=path/to/freedoom1.wad python3 tools/mkwad.py
-FREEDOOM_WAD=path/to/freedoom1.wad python3 tools/mksounds.py
-```
-
-## Layout
-
-```
-interp/bel.js     the interpreter          interp/bel.bel   PG's spec, unmodified
-doom/*.bel        the engine               wad/e1m1.wad     Freedoom E1M1 + needed resources (BSD)
-web/              browser front end        wad/sounds.wad   Freedoom sound effects
-bin/              CLI, terminal, recorder  tools/           WAD builders, snapshot tool
-test/             interpreter tests        docs/protocol.md engine/host frame and sound protocol
-```
+- One level, E1M1. The pistol is the only weapon; shells and other weapons can be picked up but do nothing. Imp fireballs hit instantly instead of flying.
+- Monster sight is range, facing and a clear line through the blockmap, with no REJECT table. Gunfire wakes monsters within 1,000 units instead of flooding through sectors.
+- The blue key isn't required, and the exit switch takes you back to the start.
+- Bel recursion runs on the JavaScript stack, so a browser worker fits about 1,000 nested non-tail calls. The engine uses tail recursion and `map`/`foldl` for long lists, which is also what *ANSI Common Lisp* advises for efficiency.
 
 ## Credits
 
-Bel by Paul Graham. Maps, textures, sprites and sounds from [Freedoom](https://freedoom.github.io/) 0.13.0 (BSD license, see `wad/COPYING-freedoom.txt`). Doom by id Software.
+Bel is by Paul Graham; `interp/bel.bel` is his spec, included unmodified. The maps, textures, sprites and sounds are from [Freedoom](https://freedoom.github.io/) 0.13.0 (BSD license, see `wad/COPYING-freedoom.txt`). Doom is by id Software.
+
+This repository's own code is MIT licensed; see [LICENSE](LICENSE). The license does not cover `interp/bel.bel`, which is Paul Graham's spec, included unmodified and published without a license of its own, or the Freedoom assets in `wad/`, which stay under Freedoom's BSD license.
 
 ## Changelog
 
-- 2026-10-06: First version: interpreter, functional Doom engine, browser, terminal and video front ends, sound.
+- 2026-10-06: README rewritten for a general audience; full interpreter reference in `docs/interpreter.md`; GitHub Pages entry point; MIT license.
+- 2026-10-05: First version: interpreter, functional Doom engine, browser, terminal and video front ends, sound.
