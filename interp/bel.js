@@ -385,6 +385,7 @@ function ev(e, a, w) {
       if (c === null) {
         if (e === SCOPE) return w ? unfindable() : a;
         if (e === GLOBE) return w ? unfindable() : globeList();
+        if (w === 2) return list(globalCell(e), D);
         return w ? sigerr(sym('unbound')) : sigerr(list(UNBOUNDB, e));
       }
       return w ? list(c, D) : c.d;
@@ -768,7 +769,7 @@ function wherePlace(place, a, isNew) {
     }
     return list(c, D);
   }
-  return ev(place, a, true);
+  return ev(place, a, isNew ? 2 : 1);
 }
 
 function assign(p, v, a) {
@@ -781,7 +782,7 @@ function assign(p, v, a) {
     assignCell(c, v);
     return v;
   }
-  const loc = ev(p, a, true);
+  const loc = ev(p, a, 2);
   const cell = loc.a, which = loc.d.a;
   if (!(cell instanceof Pair)) return sigerr(sym('bad-place'));
   if (which === A) cell.a = v;
@@ -1451,6 +1452,9 @@ jet('caddr', (a) => {
 jet('find', (a) => {
   for (let p = a[1]; p instanceof Pair; p = p.d) if (applyF(a[0], [p.a]) !== NIL) return p.a;
   return NIL;
+}, (a) => {
+  for (let p = a[1]; p instanceof Pair; p = p.d) if (applyF(a[0], [p.a]) !== NIL) return list(p, A);
+  return unfindable();
 });
 jet('begins', (a) => {
   let xs = a[0], pat = a[1];
@@ -1551,6 +1555,11 @@ jet('last', (a) => {
   if (!(p instanceof Pair)) return NIL;
   while (p.d instanceof Pair) p = p.d;
   return p.a;
+}, (a) => {
+  let p = a[0];
+  if (!(p instanceof Pair)) return unfindable();
+  while (p.d instanceof Pair) p = p.d;
+  return list(p, A);
 });
 jet('udrop', (a) => {
   let xs = a[0], ys = a[1];
@@ -1567,8 +1576,11 @@ jet('hug', (a) => {
   }
   return arrToList(out);
 });
+const orig = {};
+const isMacro = (f) => f instanceof Pair && f.a === LIT && f.d instanceof Pair && f.d.a === MAC;
 jet('compose', (a) => {
   const fs = a.slice();
+  if (fs.some(isMacro)) return applyF(orig.compose, fs);
   if (fs.length === 0) return mkprim('idfn', (b) => b[0]);
   return mkprim('composed', (args) => {
     let v = applyF(fs[fs.length - 1], args);
@@ -1823,6 +1835,7 @@ export class Bel {
     } finally {
       loading = false;
     }
+    for (const name of Object.keys(jets)) if (sym(name).gcell) orig[name] = sym(name).gcell.d;
     for (const [name, { fn, loc }] of Object.entries(jets)) {
       const s = sym(name);
       globalCell(s).d = mkprim(name, fn, loc);
