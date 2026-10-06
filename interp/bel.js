@@ -680,6 +680,7 @@ function ev(e, a, w) {
         if (w && tag === TAB) {
           for (let p = f.d.d; p instanceof Pair; p = p.d) if (equal(p.a.a, args[0])) return list(p.a, D);
           const kv = new Pair(args[0], NIL);
+          epoch++;
           f.d.d = new Pair(kv, f.d.d);
           return list(kv, D);
         }
@@ -793,7 +794,7 @@ function assign(p, v, a) {
   const cell = loc.a, which = loc.d.a;
   if (!(cell instanceof Pair)) return sigerr(sym('bad-place'));
   if (which === A) cell.a = v;
-  else if (which === D) assignCell(cell, v);
+  else if (which === D) { epoch++; assignCell(cell, v); }
   else return sigerr(sym('bad-place'));
   return v;
 }
@@ -1175,6 +1176,7 @@ function enq(c, q) {
     p = q.x;
   }
   const cell = new Pair(c, NIL);
+  epoch++;
   p.d = cell;
   q.x = cell;
 }
@@ -1207,8 +1209,47 @@ function writeText(text, s) {
 
 // ---------------------------------------------------------------- natives
 
+// CDR-coding cache, in the spirit of the Lisp Machine: a list that is indexed
+// repeatedly gets a hidden vector of its cells, so nth and drop become O(1).
+// Any structural mutation (xdr) bumps a global epoch and invalidates every
+// cache; car mutation (xar) is safe because the vector holds cells.
+let epoch = 0;
+class CellVec {
+  constructor() { this.hits = 0; this.ep = -1; this.cells = null; this.ring = false; this.done = false; }
+}
+function cellsUpTo(xs, n) {
+  // returns a CellVec whose cells cover indices < n where the list allows, or null
+  let c = xs.x;
+  if (c === null) { c = new CellVec(); xs.x = c; }
+  else if (!(c instanceof CellVec)) return null;
+  if (c.ep !== epoch) {
+    if (++c.hits < 3) return null;
+    c.cells = [xs];
+    c.ring = false;
+    c.done = false;
+    c.ep = epoch;
+  }
+  const cells = c.cells;
+  while (cells.length < n && !c.done) {
+    const p = cells[cells.length - 1].d;
+    if (!(p instanceof Pair)) { c.done = true; break; }
+    if (p === xs) { c.ring = true; c.done = true; break; }
+    cells.push(p);
+  }
+  return c;
+}
+
 function nth(n, xs) {
   if (!Number.isInteger(n) || n < 1) return sigerr(sym('mistype'));
+  if (n > 8 && xs instanceof Pair) {
+    const c = cellsUpTo(xs, n);
+    if (c !== null) {
+      const cells = c.cells;
+      if (n <= cells.length) return cells[n - 1].a;
+      if (c.ring) return cells[(n - 1) % cells.length].a;
+      return sigerr(sym('mistype'));
+    }
+  }
   let p = xs;
   for (let i = 1; i < n; i++) {
     if (!(p instanceof Pair)) return sigerr(sym('mistype'));
@@ -1317,6 +1358,7 @@ const prims = {
   },
   xdr: (a) => {
     if (!(a[0] instanceof Pair)) return sigerr(sym('xdr-on-atom'));
+    epoch++;
     a[0].d = a[1];
     return a[1];
   },
@@ -1541,7 +1583,18 @@ jet('pos', (a) => {
 jet('nth', (a) => nth(a[0], a[1]), locNth);
 jet('drop', (a) => {
   let p = a[1];
-  for (let i = 0; i < a[0]; i++) p = p instanceof Pair ? p.d : NIL;
+  const n = a[0];
+  if (n > 8 && p instanceof Pair && Number.isInteger(n)) {
+    const c = cellsUpTo(p, n + 1);
+    if (c !== null) {
+      const cells = c.cells;
+      if (n < cells.length) return cells[n];
+      if (c.ring) return cells[n % cells.length];
+      if (n === cells.length) return cells[n - 1].d;
+      return NIL;
+    }
+  }
+  for (let i = 0; i < n; i++) p = p instanceof Pair ? p.d : NIL;
   return p;
 });
 jet('first', (a) => {

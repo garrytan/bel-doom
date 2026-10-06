@@ -119,3 +119,15 @@ for (const [src, want] of cases) {
 }
 console.log(`${cases.length - fail}/${cases.length} passed`);
 if (fail) process.exit(1);
+// CDR-coding cache must stay correct across structural mutation
+{
+  const r = bel.print(bel.evalString(`(let xs (list 1 2 3 4 5 6 7 8 9 10 11 12)
+     (let a (list (nth 11 xs) (nth 11 xs) (nth 11 xs) (nth 11 xs))
+       (xdr (drop 9 xs) '(x y z))
+       (list a (nth 11 xs) (nth 11 xs) (drop 9 xs) (len xs))))`));
+  const want = '((11 11 11 11) x x (10 x y z) 13)';
+  if (r !== want) { console.log('FAIL cdr cache', r, 'want', want); process.exit(1); }
+  const ring = bel.print(bel.evalString(`(let xs (list 1 2 3 4 5) (xdr (lastcdr xs) xs) (list (nth 12 xs) (nth 12 xs) (nth 12 xs) (car (drop 23 xs)) (car (drop 23 xs))))`));
+  if (ring !== '(2 2 2 4 4)') { console.log('FAIL ring cache', ring); process.exit(1); }
+  console.log('cdr cache ok');
+}
