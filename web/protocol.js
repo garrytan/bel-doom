@@ -66,39 +66,85 @@ export function loadSounds(wadBytes) {
 }
 
 
-// Boots the interpreter and engine; returns the screen size, palette and a frame(keys) stepper.
-export function bootEngine({ Bel, readFile, wad = 'wad/e1m1.wad', hires = false, status = () => {}, log = () => {} }) {
+// Parameters of a Bel closure (lit clo env parms body): all of them, and the required ones ((o x) optionals
+// and a rest tail don't count as required).
+export function closureParams(bel, f) {
+  const pair = (x) => x !== null && typeof x === 'object' && 'a' in x && 'd' in x;
+  let p = f;
+  for (let i = 0; i < 3 && pair(p); i++) p = p.d;
+  if (!pair(p)) return { total: 0, required: 0 };
+  let total = 0, required = 0;
+  for (let q = p.a; pair(q); q = q.d) { total++; if (!(pair(q.a) && q.a.a === bel.sym('o'))) required++; }
+  return { total, required };
+}
+
+export function parseRes(s) {
+  const m = /^(\d+)x(\d+)$/.exec(s || '');
+  return m ? [Number(m[1]), Number(m[2])] : null;
+}
+
+// Boots the interpreter and engine. Returns the screen size and palette plus:
+//   frame(keys)  one tic and one rendered frame (doom-frame), for the offline tools
+//   tick(keys)   one tic, (doom-tick w keys), and its sound events     } only when the engine
+//   draw()       one frame of the current world, (doom-draw w)          } has both (split = true)
+// The functional engine returns the world from doom-init and threads it through every call.
+// res [w, h] passes the size to (doom-init path w h); hires is 320x200 (doom/hires.bel on older engines);
+// compile: false runs the interpreter's closure tier only.
+export function bootEngine({ Bel, readFile, wad = 'wad/e1m1.wad', hires = false, res = null, compile, status = () => {}, log = () => {} }) {
   const t0 = performance.now();
+  const size = res || (hires ? [320, 200] : null);
   status('booting Bel (evaluating bel.bel)');
-  const bel = new Bel({ readFile });
+  const bel = new Bel(compile === false ? { readFile, compile: false } : { readFile });
   status('loading doom/main.bel');
   bel.loadFile('doom/main.bel');
-  if (hires) bel.loadFile('doom/hires.bel');
+  const sized = !!size && closureParams(bel, bel.global('doom-init')).total >= 3;
+  if (size && !sized) {
+    if (size[0] !== 320 || size[1] !== 200) throw new Error(`this engine's doom-init takes no screen size, so ${size.join('x')} is unavailable`);
+    bel.loadFile('doom/hires.bel');
+  }
   log(latin1(bel.takeOutput()));
   status(`doom-init: loading and parsing ${wad}`);
-  let world = bel.call('doom-init', wad);
-  // The functional engine returns the world from doom-init and threads it through doom-frame.
+  let world = sized ? bel.call('doom-init', wad, size[0], size[1]) : bel.call('doom-init', wad);
   const functional = world !== bel.t && world !== bel.nil && typeof world === 'object';
   const init = splitPacket(bel.takeOutput(), 'P', 768);
   log(init.text);
   if (!init.data) throw new Error('doom-init wrote no P (palette) packet');
-  const w = bel.evalString('screen-w'), h = bel.evalString('screen-h');
+  let w, h;
+  if (sized) [w, h] = size;
+  else { try { w = bel.evalString('screen-w'); h = bel.evalString('screen-h'); } catch { [w, h] = size || [160, 100]; } }
   if (!(w > 0 && h > 0)) throw new Error(`bad screen size ${w}x${h}`);
   const n = w * h;
+  const split = functional && !!bel.global('doom-tick') && !!bel.global('doom-draw');
   let tic = 0;
+  const packet = (out) => {
+    const f = splitPacket(out, 'F', n);
+    if (!f.data) { log(f.text); throw new Error(`the engine wrote no F packet of ${n} bytes (got ${out.length} bytes)`); }
+    const s = splitSounds(f.text);
+    log(s.text);
+    return { frame: f.data, sounds: s.sounds };
+  };
   return {
-    bel, w, h, palette: init.data, initMs: performance.now() - t0, functional,
+    bel, w, h, palette: init.data, initMs: performance.now() - t0, functional, split,
+    tick(keys) {
+      const t = performance.now();
+      world = bel.call('doom-tick', world, keys);
+      const s = splitSounds(latin1(bel.takeOutput()));
+      log(s.text);
+      return { ms: performance.now() - t, sounds: s.sounds, tic: ++tic };
+    },
+    draw() {
+      const t = performance.now();
+      world = bel.call('doom-draw', world);
+      const t2 = performance.now();
+      const p = packet(bel.takeOutput());
+      return { frame: p.frame, sounds: p.sounds, renderMs: t2 - t, writeMs: performance.now() - t2 };
+    },
     frame(keys) {
       const t = performance.now();
       if (functional) world = bel.call('doom-frame', world, keys);
       else bel.call('doom-frame', keys);
-      const out = bel.takeOutput();
-      const ms = performance.now() - t;
-      const f = splitPacket(out, 'F', n);
-      if (!f.data) { log(f.text); throw new Error(`doom-frame wrote no F packet of ${n} bytes (got ${out.length} bytes)`); }
-      const s = splitSounds(f.text);
-      log(s.text);
-      return { frame: f.data, ms, tic: ++tic, sounds: s.sounds };
+      const p = packet(bel.takeOutput());
+      return { frame: p.frame, ms: performance.now() - t, tic: ++tic, sounds: p.sounds };
     },
   };
 }

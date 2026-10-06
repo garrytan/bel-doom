@@ -1,0 +1,41 @@
+{
+  "lo": {
+    "init": "04b1bcfaf78ecfb154ceaa680de41d18",
+    "walk": "a387570c6f925c445bbb8124551fd231",
+    "fence-west": "708a1883141543cd9631a1f3992ee54d",
+    "fence-east": "80a8817ee2e239817ceeb055246c12df",
+    "combat": "b03f93321af319ae99143540e1657396",
+    "door": "a7c286f7105e19fdc3180a0225ccdbb2",
+    "barrels": "170246e02aba2a70d4d2bb05abeb790c",
+    "pickup": "605aa20f9d030389a194736db7b00b74",
+    "pain-tint": "8c9fc0cd1168b2d74daab32d2b3f093e",
+    "bonus-tint": "adcbc93cfc31d60c03f89aa6a4f10d0d",
+    "death-respawn": "f8810c48af9f3ff3712994b880789974"
+  },
+  "hi": {
+    "init": "04b1bcfaf78ecfb154ceaa680de41d18",
+    "walk": "70051506c505d99ab29017d4b5efcd1f",
+    "fence-west": "40a8feec8a6d7790b8e604cebd35a765",
+    "fence-east": "62c450413d79f75edee73093c13a99cf",
+    "combat": "f18b69be4c6c309c6fec5a9da5bea870",
+    "door": "08ad979384240b0de7d464c8967d020a",
+    "barrels": "46c16b3b2945349d1ab4964410060635",
+    "pickup": "36e988d7becec18f0bd33714adb0cfe7",
+    "pain-tint": "22a475e001349c353e35d8a7c5da8d91",
+    "bonus-tint": "386b9441af9e19a9fa318a2f8c1b92c6",
+    "death-respawn": "a87b4058568309a085eaae1cf70105fa"
+  },
+  "640x480": {
+    "init": "04b1bcfaf78ecfb154ceaa680de41d18",
+    "walk": "83ac2e1bee6d74a6745ab5674e7965dc",
+    "fence-west": "fdbc51def2489cdc1dfff71191112537",
+    "fence-east": "7089e000f2cd5204efaefe39372ffd8b",
+    "combat": "99ed72a4796a25932f3febb561116a0f",
+    "door": "091f95e007dc305928f72f6e0bcd50c7",
+    "barrels": "3d200706d3a10d9b13ebfbdd00f717bd",
+    "pickup": "ce03c30886f39b89f016edf22bb3b1d6",
+    "pain-tint": "13052ec5466ea759351421bb4d8a3176",
+    "bonus-tint": "8f771380345e5d003451c164e0f84633",
+    "death-respawn": "5dd05aba5cd08528fd7b34a62b750edc"
+  }
+}

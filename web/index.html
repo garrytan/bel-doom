@@ -23,8 +23,12 @@
   #bar { width: min(96vw, calc((100vh - 120px) * 4 / 3)); display: flex; justify-content: space-between; gap: 12px; color: var(--dim); }
   #bar span b { color: var(--fg); font-weight: 600; }
   #fps b { color: var(--red); }
-  #detail { color: var(--dim); text-decoration: none; border-bottom: 1px dotted #444; }
-  #detail:hover { color: var(--red); }
+  #detail a { color: var(--dim); text-decoration: none; border-bottom: 1px dotted #444; }
+  #detail a.current { color: var(--fg); border-bottom-color: var(--red); }
+  #detail a:hover { color: var(--red); }
+  #debug { position: absolute; top: 8px; left: 8px; margin: 0; padding: 6px 8px; background: rgba(0, 0, 0, .7);
+    color: #9f9; font: 11px/1.35 ui-monospace, Menlo, Consolas, monospace; white-space: pre; pointer-events: none; }
+  #debug.hidden { display: none; }
   .keys { color: var(--dim); font-size: 12px; text-align: center; }
   .src { color: var(--dim); font-size: 11px; }
   .src a { color: var(--dim); text-decoration: none; border-bottom: 1px dotted #444; }
@@ -37,18 +41,19 @@
   <h1><b>DOOM</b>, written in Paul Graham's Bel, interpreted in your browser</h1>
   <div id="frame">
     <canvas id="screen" width="800" height="600"></canvas>
+    <pre id="debug" class="hidden"></pre>
     <div id="overlay"><div class="big">LOADING</div><div id="status">starting worker</div><div id="elapsed"></div></div>
   </div>
   <div id="bar">
     <span id="fps">fps <b>-</b></span>
-    <span id="tic">tic <b>-</b> &middot; <b>-</b> ms/frame in Bel</span>
+    <span id="tic">tic <b>-</b> &middot; game <b>-</b> tics/s</span>
     <span id="snd">sound <b>loading</b> (M)</span>
     <span id="held">keys <b>-</b></span>
-    <a id="detail" href="?hires=1">high detail (320x200)</a>
+    <span id="detail"></span>
   </div>
   <div class="keys">
     <kbd>W A S D</kbd>/<kbd>arrows</kbd> move &middot; <kbd>Q</kbd><kbd>E</kbd>/<kbd>Alt+&larr;&rarr;</kbd> strafe &middot;
-    <kbd>Shift</kbd> run &middot; <kbd>Ctrl</kbd>/<kbd>F</kbd> fire &middot; <kbd>Space</kbd>/<kbd>U</kbd> use &middot; <kbd>M</kbd> mute &middot; <kbd>Esc</kbd> pause &middot; double-click fullscreen
+    <kbd>Shift</kbd> run &middot; <kbd>Ctrl</kbd>/<kbd>F</kbd> fire &middot; <kbd>Space</kbd>/<kbd>U</kbd> use &middot; <kbd>M</kbd> mute &middot; <kbd>`</kbd> stats &middot; <kbd>Esc</kbd> pause &middot; double-click fullscreen
   </div>
   <div class="src">engine <a href="../doom/main.bel">doom/*.bel</a> &middot; interpreter <a href="../interp/bel.js">interp/bel.js</a> running <a href="../interp/bel.bel">bel.bel</a> &middot; map from Freedoom</div>
   <script type="module" src="main.js"></script>
