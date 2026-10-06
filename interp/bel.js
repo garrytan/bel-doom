@@ -5,11 +5,16 @@
 // plain lists of the form (lit clo env parms body), macros of the form
 // (lit mac clo), and dynamic/lexical/global lookup in that order.  It then
 // loads the unmodified bel.bel, so every definition in the spec exists exactly
-// as written.  For speed, a set of hot definitions are replaced afterwards by
-// native "jets" with the same behavior, macro expansions are cached per call
-// site, and the core macros fn, do, set, def, mac, let and rfn are evaluated
-// natively while their global values are still the ones bel.bel defined.
-// Numbers are IEEE doubles (a deliberate deviation from Bel's exact rationals).
+// as written.  For speed, 87 hot definitions are replaced afterwards by native
+// "jets" with the same behavior, macro expansions are cached per call site,
+// the core macros (fn do set def mac let rfn when unless and or case with
+// withs for while repeat til loop) are evaluated natively while their global
+// values are still the ones bel.bel defined, code is compiled to JavaScript
+// closures with trampolined tail calls, and repeatedly indexed lists get a
+// CDR-coding cache.  Numbers are IEEE doubles (a deliberate deviation from
+// Bel's exact rationals).
+//
+// Full documentation: docs/interpreter.md
 
 class Sym {
   constructor(name) {
@@ -2291,6 +2296,19 @@ function toBel(x) {
 
 let booted = false;
 
+/**
+ * One Bel world: the 16 primitives, the unmodified bel.bel, and the jets.
+ * There can be one instance per JavaScript realm (symbols are interned
+ * module-wide).
+ *
+ * @param {object} opts
+ * @param {(path: string) => Uint8Array|null} [opts.readFile]  backs (ops path 'in), (load path), and finding bel.bel
+ * @param {(path: string, bytes: Uint8Array) => void} [opts.writeFile]  receives an output stream's bytes on (cls s)
+ * @param {(bytes: Uint8Array) => void} [opts.stdout]  sink for the default output stream (outs = nil)
+ * @param {() => number} [opts.stdin]  next byte of the default input stream (ins = nil), or -1 at end
+ * @param {string} [opts.belSource]  text of bel.bel; defaults to readFile('interp/bel.bel')
+ * @param {(command: string) => boolean} [opts.sys]  implementation of the sys primitive
+ */
 export class Bel {
   constructor(opts = {}) {
     if (booted) throw new Error('only one Bel instance per JS realm');
@@ -2331,6 +2349,7 @@ export class Bel {
       globalCell(s).d = mkprim(name, fn, loc);
     }
   }
+  /** Reads and evaluates every expression in src; returns the last value. */
   evalString(src) {
     try {
       return loadText(src);
@@ -2338,6 +2357,7 @@ export class Bel {
       stdoutStream.flush();
     }
   }
+  /** Reads a file through readFile and evaluates every expression in it; returns the last value. */
   loadFile(path) {
     const data = host.readFile(path);
     if (!data) throw new Error('cannot open ' + path);
@@ -2347,6 +2367,10 @@ export class Bel {
       stdoutStream.flush();
     }
   }
+  /**
+   * Applies the global function `name`. JS strings become Bel strings, arrays
+   * lists, true/false/null t/nil; numbers and Bel values pass through.
+   */
   call(name, ...args) {
     const f = sym(name).gcell;
     if (!f) throw new Error('undefined: ' + name);
@@ -2356,14 +2380,23 @@ export class Bel {
       stdoutStream.flush();
     }
   }
+  /** Bytes written to the default output since the last call (when there is no stdout sink). */
   takeOutput() { return stdoutStream.take(); }
+  /** Sends buffered default output to the stdout sink. */
   flush() { stdoutStream.flush(); }
+  /** Bel's printed representation of x. */
   print(x) { return printString(x); }
+  /** A JS string as a Bel string (a list of characters). */
   str(s) { return str(s); }
+  /** A Bel string as a JS string. */
   jsstr(x) { return jsstr(x); }
+  /** A Bel list of the arguments. */
   list(...xs) { return list(...xs); }
+  /** The elements of a proper Bel list, as an array. */
   toArray(l) { return listToArr(l); }
+  /** The interned symbol called name. */
   sym(name) { return sym(name); }
+  /** The global value of name, or undefined if it is unbound. */
   global(name) {
     const c = sym(name).gcell;
     return c ? c.d : undefined;
