@@ -87,14 +87,18 @@ export function parseRes(s) {
 //   frame(keys)  one tic and one rendered frame (doom-frame), for the offline tools
 //   tick(keys)   one tic, (doom-tick w keys), and its sound events     } only when the engine
 //   draw()       one frame of the current world, (doom-draw w)          } has both (split = true)
+//   drawSlice(x0, x1)  columns x0..x1 of that frame: (doom-draw-slice w x0 x1) when the engine has it
+//                (sliceApi = true), else cut out of a full doom-draw (same bytes, no speedup)
+//   digest()     a string of the gameplay state, for checking that replicated engines stay in lockstep
+//   tic          tics run so far
 // The functional engine returns the world from doom-init and threads it through every call.
 // res [w, h] passes the size to (doom-init path w h); hires is 320x200 (doom/hires.bel on older engines);
-// compile: false runs the interpreter's closure tier only.
-export function bootEngine({ Bel, readFile, wad = 'wad/e1m1.wad', hires = false, res = null, compile, status = () => {}, log = () => {} }) {
+// tier ('ev', 'closure' or 'js') caps the interpreter's execution tier; cutSlices ignores doom-draw-slice (A/B tests).
+export function bootEngine({ Bel, readFile, wad = 'wad/e1m1.wad', hires = false, res = null, tier, cutSlices = false, status = () => {}, log = () => {} }) {
   const t0 = performance.now();
   const size = res || (hires ? [320, 200] : null);
   status('booting Bel (evaluating bel.bel)');
-  const bel = new Bel(compile === false ? { readFile, compile: false } : { readFile });
+  const bel = new Bel(tier ? { readFile, tier } : { readFile });
   status('loading doom/main.bel');
   bel.loadFile('doom/main.bel');
   const sized = !!size && closureParams(bel, bel.global('doom-init')).total >= 3;
@@ -115,6 +119,9 @@ export function bootEngine({ Bel, readFile, wad = 'wad/e1m1.wad', hires = false,
   if (!(w > 0 && h > 0)) throw new Error(`bad screen size ${w}x${h}`);
   const n = w * h;
   const split = functional && !!bel.global('doom-tick') && !!bel.global('doom-draw');
+  const sliceApi = split && !cutSlices && !!bel.global('doom-draw-slice');
+  const at = (k, x) => bel.call('at', bel.sym(k), x);
+  const pair = (x) => x !== null && typeof x === 'object' && 'a' in x && 'd' in x;
   let tic = 0;
   const packet = (out) => {
     const f = splitPacket(out, 'F', n);
@@ -124,7 +131,31 @@ export function bootEngine({ Bel, readFile, wad = 'wad/e1m1.wad', hires = false,
     return { frame: f.data, sounds: s.sounds };
   };
   return {
-    bel, w, h, palette: init.data, initMs: performance.now() - t0, functional, split,
+    bel, w, h, palette: init.data, initMs: performance.now() - t0, functional, split, sliceApi,
+    get tic() { return tic; },
+    drawSlice(x0, x1) {
+      const t = performance.now();
+      if (!sliceApi) {
+        const d = this.draw();
+        return { ...d, frame: d.frame.slice(x0 * h, (x1 + 1) * h) };
+      }
+      world = bel.call('doom-draw-slice', world, x0, x1);
+      const t2 = performance.now();
+      const out = bel.takeOutput();
+      const f = splitPacket(out, 'F', (x1 - x0 + 1) * h);
+      if (!f.data) { log(f.text); throw new Error(`doom-draw-slice ${x0} ${x1} wrote no F packet of ${(x1 - x0 + 1) * h} bytes (got ${out.length})`); }
+      const s = splitSounds(f.text);
+      log(s.text);
+      return { frame: f.data, sounds: s.sounds, renderMs: t2 - t, writeMs: performance.now() - t2 };
+    },
+    digest() {
+      const num = (v) => (typeof v === 'number' ? v : 0);
+      let sx = 0, sy = 0, shp = 0, n = 0;
+      for (let p = at('mobjs', world); pair(p); p = p.d, n++) {
+        sx += num(at('x', p.a)); sy += num(at('y', p.a)); shp += num(at('hp', p.a));
+      }
+      return [tic, ...['px', 'py', 'pangle', 'health', 'ammo'].map((k) => num(at(k, world))), n, sx, sy, shp].join(' ');
+    },
     tick(keys) {
       const t = performance.now();
       world = bel.call('doom-tick', world, keys);

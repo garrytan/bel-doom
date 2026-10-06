@@ -3,15 +3,14 @@
 ; one per screen row.
 ;
 ; Walls are drawn front to back by walking the BSP tree.  The state threaded
-; through the walk is (columns solid count planes masked seen):
+; through the walk is (columns planes masked seen):
 ;
-;   columns  per screen column (top bottom tops bottoms clips): rows top to
-;            bottom are still open; tops and bottoms are the pixel runs drawn
-;            so far above and below them, newest first; clips records
-;            (1/z top bottom) each time a wall narrowed the column, for
-;            clipping sprites later
-;   solid    per column, t once it is closed
-;   count    how many columns are closed; the walk stops at the width
+;   columns  a tree over the screen columns (see make-tree); each column is
+;            (top bottom tops bottoms clips): rows top to bottom are still
+;            open; tops and bottoms are the runs drawn so far above and below
+;            them, newest first; clips records (1/z top bottom) each time a
+;            wall narrowed the column, for clipping sprites later.  The walk
+;            stops once every column is closed.
 ;   planes   floor and ceiling tables computed so far, by (start height)
 ;   masked   see-through middle textures to draw with the sprites
 ;   seen     sectors drawn, whose things may be visible
@@ -48,25 +47,37 @@
                   (map [+ 168 (floor (/ (* _ 32) (- height view-h)))] (iota (- height view-h)))))))
 
 (def render (w)
+  (render-slice w 0 (- (car (at 'screen w)) 1)))
+
+; The frame's columns x0..x1.  The walk over the BSP is always full width,
+; so what is visible (sectors seen, which sprites, their order with the
+; see-through middles) does not depend on the slice, but only the slice's
+; columns record what to draw, and only they are drawn.  Each column is
+; built once: its runs top to bottom onto one reversed list, then that list
+; onto the column's status bar.
+(def render-slice (w x0 x1)
   (withs (lv     (at 'lv w)
           scr    (at 'screen w)
           (width height view-h . srest) scr
           angle  (at 'pangle w)
           vcos   (cos angle)
           vsin   (sin angle)
-          v      (list (at 'px w) (at 'py w) (eye-z w) vcos vsin (at 'heights w) lv angle
-                       (sky-columns lv angle) (view-rays scr vcos vsin) scr)
+          px     (at 'px w)
+          py     (at 'py w)
+          v      (list px py (eye-z w) vcos vsin (at 'heights w) lv angle
+                       (sky-columns lv angle) (view-rays scr vcos vsin) scr x0 x1)
           st     (render-node (at 'root lv) v
-                              (list (fill width (list 0 (- view-h 1) nil nil nil))
-                                    (fill width nil) 0 nil nil nil))
-          cols   (map column-pixels (car st))
-          clips  (map [nth 5 _] (car st))
-          scene  (draw-things w v cols clips (nth 5 st) (nth 6 st))
-          shot   (draw-weapon w scene)
-          tinted (if (> (at 'pain-tics w) 0)  (tint shot (at 'pain-table lv))
-                     (> (at 'bonus-tics w) 0) (tint shot (at 'bonus-table lv))
-                                              shot))
-    (map append tinted (cdr (at 'hud w)))))
+                              (list (make-tree 0 (- width 1) (list 0 (- view-h 1) nil nil nil))
+                                    nil nil nil))
+          n      (- x1 x0 -1)
+          recs   (rev (tree-leaves (car st) 0 (- width 1) x0 x1 nil))
+          tab    (if (> (at 'pain-tics w) 0)  (at 'pain-table lv)
+                     (> (at 'bonus-tics w) 0) (at 'bonus-table lv))
+          ovls   (weapon-runs w v (thing-runs w v (fill n nil) (map [nth 5 _] recs) (nth 3 st) (nth 4 st))))
+    (map (fn (c hud ovl) (build-column c hud ovl px py tab view-h))
+         recs
+         (first n (drop x0 (cdr (at 'hud w))))
+         ovls)))
 
 (def eye-z (w)
   (+ (at 'pfloor w)
@@ -74,35 +85,166 @@
          view-height
          (max 10 (- view-height (* 3 (at 'dead-tics w)))))))
 
-; A finished column: the runs above, whatever was never drawn (black), and
-; the runs below.
-(def column-pixels (c)
+; A column: the runs above its open rows, top first, black for any rows
+; never drawn, then the runs below, onto a reversed list (bottom row
+; first).  That list then goes onto the status bar's rows, bottom first, so
+; the column comes out top first, through the tint table if any.  Sprites,
+; see-through middles and the weapon arrive as overlay runs (nearest
+; first), also bottom first, and replace the rows they cover wherever they
+; are not transparent, during that same last pass.
+(def build-column (c hud ovl px py tab view-h)
   (let (top bot tops bots clips) c
-    (append (apply append (rev tops))
-            (fill (- bot top -1) (nchar 0))
-            (apply append bots))))
+    (let racc (foldl (fn (d acc) (paint d acc px py))
+                     (fill-onto (- bot top -1) (nchar 0)
+                                (foldl (fn (d acc) (paint d acc px py)) nil (rev tops)))
+                     bots)
+      (if ovl
+          (withs ((ny nn nts)  (car ovl)
+                  nh           (+ ny nn -1)
+                  (fy fh fts)  (if (cdr ovl) (combine-runs (cdr ovl)) (list view-h -1 nil))
+                  lo           (min ny fy)
+                  hi           (max nh fh)
+                  below        (- view-h 1 hi)
+                  n            (- hi lo -1))
+            (onto (drop (+ below n) racc)
+                  (merge-onto n hi (drop below racc) ny nh nts fy fh fts
+                              (onto-n below racc hud tab) tab)
+                  tab))
+          (onto racc hud tab)))))
+
+; xs, which are reversed, onto acc, through the tint table if any.
+(def onto (xs acc tab)
+  (if tab
+      (foldl (fn (ch acc) (cons (nth (+ 1 (charn ch)) tab) acc)) acc xs)
+      (foldl cons acc xs)))
+
+(def onto-n (n xs acc tab)
+  (if (> n 0)
+      (onto-n (- n 1) (cdr xs) (cons (tinted (car xs) tab) acc) tab)
+      acc))
+
+; n rows of xs from row y up onto acc, each replaced by the pixel of the
+; near run (rows ny..nh, pixels nts) or else of the far run (fy..fh, fts)
+; where they cover it and are not transparent.
+(def merge-onto (n y xs ny nh nts fy fh fts acc tab)
+  (if (> n 0)
+      (with (in-near (<= ny y nh) in-far (<= fy y fh))
+        (merge-onto (- n 1) (- y 1) (cdr xs)
+                    ny nh (if in-near (cdr nts) nts)
+                    fy fh (if in-far (cdr fts) fts)
+                    (cons (tinted (or (and in-near (car nts)) (and in-far (car fts)) (car xs)) tab) acc)
+                    tab))
+      acc))
+
+(def tinted (ch tab)
+  (if tab (nth (+ 1 (charn ch)) tab) ch))
+
+; Overlay runs (top-row rows pixels), pixels bottom first and nil where
+; transparent, nearest first, as one run (top bottom pixels) where nearer
+; runs cover farther ones.  Columns with more than two runs use this for
+; all but the nearest.
+(def combine-runs (runs)
+  (withs (lo (apply min (map car runs))
+          hi (apply max (map [+ (car _) (cadr _) -1] runs)))
+    (list lo hi
+          (if (no (cdr runs))
+              (caddr (car runs))
+              (foldl (fn ((ya n texels) acc)
+                       (let off (- hi (+ ya n -1))
+                         (append (first off acc)
+                                 (map (fn (near far) (or near far)) texels (drop off acc))
+                                 (drop (+ off n) acc))))
+                     (fill (- hi lo -1) nil)
+                     (rev runs))))))
+
+(def fill-onto (n x acc)
+  (if (> n 0) (fill-onto (- n 1) x (cons x acc)) acc))
+
+; A run is (kind rows . details):
+;   (wall n v step texture-column height colormap)
+;   (flat n plane-table-from-its-first-row flat . ray)
+;   (sky n sky-column-from-its-first-row)
+;   (black n)
+; paint conses its pixels, top first, onto acc.
+(def paint (d acc px py)
+  (let (kind n . args) d
+    (case kind
+      wall (let (v step tc h cm) args (wall-run n v step tc h cm acc))
+      flat (let (zt rows . ray) args (flat-run zt n rows (car ray) (cdr ray) px py acc))
+      sky  (foldl cons acc (first n (car args)))
+           (fill-onto n (nchar 0) acc))))
+
+;;;; The column tree
+
+; The walk narrows ranges of columns, so the columns live in a balanced
+; tree: a seg replaces only the leaves it covers and the nodes above them,
+; and asks whether any of its columns are open without visiting closed
+; subtrees.  A leaf is a column; a node is (node closed left right), with
+; the number of closed columns under it.  Positions are not stored: lo..hi
+; is passed down, split at the middle.
+(def make-tree (lo hi leaf)
+  (if (= lo hi)
+      leaf
+      (let mid (floor (/ (+ lo hi) 2))
+        (list 'node 0 (make-tree lo mid leaf) (make-tree (+ mid 1) hi leaf)))))
+
+(def closed (tr lo hi)
+  (if (= lo hi)
+      (if (> (car tr) (cadr tr)) 1 0)
+      (cadr tr)))
+
+; Is some column in xa..xb still open?
+(def tree-open (tr lo hi xa xb)
+  (and (<= xa hi)
+       (>= xb lo)
+       (< (closed tr lo hi) (- hi lo -1))
+       (or (= lo hi)
+           (let mid (floor (/ (+ lo hi) 2))
+             (or (tree-open (caddr tr) lo mid xa xb)
+                 (tree-open (nth 4 tr) (+ mid 1) hi xa xb))))))
+
+; Replace each leaf c at x in xa..xb, left to right, by the leaf of
+; (f c x state), which returns (leaf . state).  A closed subtree is kept as
+; it is, and skip moves the state over its columns.  Returns (tree . state).
+(def tree-update (tr lo hi xa xb f skip state)
+  (if (or (> xa hi) (< xb lo))
+      (cons tr state)
+      (= (closed tr lo hi) (- hi lo -1))
+      (cons tr (skip state (- (min hi xb) (max lo xa) -1)))
+      (= lo hi)
+      (f tr lo state)
+      (withs (mid       (floor (/ (+ lo hi) 2))
+              (l . st1) (tree-update (caddr tr) lo mid xa xb f skip state)
+              (r . st2) (tree-update (nth 4 tr) (+ mid 1) hi xa xb f skip st1))
+        (cons (list 'node (+ (closed l lo mid) (closed r (+ mid 1) hi)) l r) st2))))
+
+; The leaves for columns x0..x1, consed right to left onto acc, so the
+; result reads right to left.
+(def tree-leaves (tr lo hi x0 x1 acc)
+  (if (or (> x0 hi) (< x1 lo))
+      acc
+      (= lo hi)
+      (cons tr acc)
+      (let mid (floor (/ (+ lo hi) 2))
+        (tree-leaves (nth 4 tr) (+ mid 1) hi x0 x1 (tree-leaves (caddr tr) lo mid x0 x1 acc)))))
 
 ;;;; The BSP walk
 
 (def render-node (n v st)
-  (if (>= (caddr st) (car (nth 11 v)))
+  (if (let w (car (nth 11 v)) (= (closed (car st) 0 (- w 1)) w))
       st
       (= (car n) 'sub)
       (foldl (fn (sg st) (render-seg sg v st)) st (cadr n))
       (let ((tag x y dx dy rbox lbox right left) (px py . rest)) (list n v)
         (if (> (* dy (- px x)) (* dx (- py y)))
             (let st (render-node right v st)
-              (if (box-visible lbox v (cadr st)) (render-node left v st) st))
+              (if (box-visible lbox v (car st)) (render-node left v st) st))
             (let st (render-node left v st)
-              (if (box-visible rbox v (cadr st)) (render-node right v st) st))))))
-
-(def range-open (xa xb solid)
-  (let i (pos nil (drop xa solid))
-    (and i (<= i (+ (- xb xa) 1)))))
+              (if (box-visible rbox v (car st)) (render-node right v st) st))))))
 
 ; Could anything in this node's bounding box still be visible?
-(def box-visible (box v solid)
-  (let ((top bot left right) (px py vz vcos vsin heights lv angle skycols rays scr)) (list box v)
+(def box-visible (box v cols)
+  (let ((top bot left right) (px py vz vcos vsin heights lv angle skycols rays scr . vrest)) (list box v)
     (or (and (<= left px right) (<= bot py top))
         (let corners (map (fn ((x y))
                             (with (dx (- x px) dy (- y py))
@@ -117,9 +259,9 @@
               t
               (let (width height view-h half-w half-h focal-x . srest) scr
                 (let xs (map [+ half-w (/ (* (cadr _) focal-x) (car _))] corners)
-                  (range-open (max 0 (floor (apply min xs)))
-                              (min (- width 1) (floor (apply max xs)))
-                              solid))))))))
+                  (tree-open cols 0 (- width 1)
+                             (max 0 (floor (apply min xs)))
+                             (min (- width 1) (floor (apply max xs)))))))))))
 
 ; Transform a seg into view space, clip it to the near plane, project it,
 ; and draw its visible columns.
@@ -148,7 +290,7 @@
           sx2 (+ half-w (/ (* s2 focal-x) z2))
           xa  (max 0 (ceil (- sx1 0.5)))
           xb  (min (- width 1) (- (ceil (- sx2 0.5)) 1)))
-    (if (and (< sx1 sx2) (<= xa xb) (range-open xa xb (cadr st)))
+    (if (and (< sx1 sx2) (<= xa xb) (tree-open (car st) 0 (- width 1) xa xb))
         (withs (iz1 (/ 1 z1)
                 iz2 (/ 1 z2)
                 diz (/ (- iz2 iz1) (- sx2 sx1))
@@ -175,36 +317,41 @@
 (def plane (planes start h)
   (cdr (get (list start h) planes)))
 
-; Rows ya.. of a floor or ceiling along the view ray (rx, ry): the row's
-; distance gives the point on the plane, its low six bits the texel.
-(def flat-pixels (tab ya n rows ray px py)
-  (let (rx . ry) ray
-    (map [nth (nth (+ 1 (mod (floor (+ px (* (car _) rx))) 64))
-                   (nth (+ 1 (mod (floor (- 0 py (* (car _) ry))) 64)) rows))
-              (cdr _)]
-         (first n (drop ya tab)))))
+; Pixels of a floor or ceiling along the view ray (rx, ry), from the
+; row whose (distance . colormap) heads zt: the row's distance gives the
+; point on the plane, its low six bits the texel.
+(def flat-run (zt n rows rx ry px py acc)
+  (if (> n 0)
+      (flat-run (cdr zt) (- n 1) rows rx ry px py
+                (cons (nth (nth (+ 1 (mod (floor (+ px (* (car (car zt)) rx))) 64))
+                                (nth (+ 1 (mod (floor (- 0 py (* (car (car zt)) ry))) 64)) rows))
+                           (cdr (car zt)))
+                      acc))
+      acc))
 
-; Rows ya.. of a wall column.  v is the texture row at the center of row
-; ya; it grows by step (map units per pixel) down the column.
-(def wall-pixels (tex n ya u ttop step cm half-h)
+; The run for n rows of a wall from row ya.  v is the texture row at the
+; center of row ya; it grows by step (map units per pixel) down the column.
+(def wall-span (tex n ya u ttop step cm half-h)
   (if (no tex)
-      (fill n (nchar 0))
+      (list 'black n)
       (let (w h cols . rest) tex
-        (wall-run n (mod (- ttop (* (- half-h ya 0.5) step)) h) step
-                  (nth (+ 1 (mod (floor u) w)) cols) h cm nil))))
+        (list 'wall n (mod (- ttop (* (- half-h ya 0.5) step)) h) step
+              (nth (+ 1 (mod (floor u) w)) cols) h cm))))
 
 (def wall-run (n v step tc h cm acc)
   (if (> n 0)
       (wall-run (- n 1) (+ v step) step tc h cm (cons (nth (nth (+ 1 (mod (floor v) h)) tc) cm) acc))
-      (rev acc)))
+      acc))
 
 ; Draw a seg's columns xa..xb: for each, the ceiling above it, the floor
-; below it, and its wall pieces, narrowing the column's open rows.
+; below it, and its wall pieces, narrowing the column's open rows.  Only
+; columns in the slice record their runs and sprite clips; the others just
+; narrow, which is all the walk needs.
 (def draw-seg (sg v st xa xb iz uz diz duz)
   (withs ((x1 y1 x2 y2 slen uoff yoff fi bi peg-top peg-bottom fake upper mid lower) sg
-          (px py vz vcos vsin heights lv angle skycols rays scr) v
+          (px py vz vcos vsin heights lv angle skycols rays scr x0 x1) v
           (width height view-h half-w half-h focal-x focal-y . srest) scr
-          (cols solid count planes masked seen) st
+          (cols planes masked seen) st
           sectors (at 'sectors lv)
           cmaps   (at 'colormaps lv)
           (ff fc) (nth (+ fi 1) heights)
@@ -226,83 +373,87 @@
           btop    (if (and bi lower) (if peg-bottom (- fc vz) bfh))
           mtop    (if (and bi mid)
                       (+ yoff (if peg-bottom (+ (max fh bfh) (cadr mid)) (min (- fc vz) bch))))
-          n       (- xb xa -1)
-          results (map (fn (c x iz uz skycol ray)
-                         (let (top bot tops bots clips) c
+          fence   (and bi mid)
+          (new iz2 uz2 mcols)
+          (tree-update
+            cols 0 (- width 1) xa xb
+            (fn (c x (iz uz ms))
+              (withs (skycol (nth (+ x 1) skycols)
+                      ray    (nth (+ x 1) rays)
+                      (rec . m)
+                      (let r (let (top bot tops bots clips) c
                            (if (> top bot)
-                               (list c nil)
-                               (withs (z     (/ 1 iz)
-                                       u     (* uz z)
-                                       k     (* focal-y iz)
-                                       step  (/ z focal-y)
-                                       cm    (nth (+ 1 (clamp (floor (- wstart (min (* 1280 iz) 23))) 0 31))
-                                                  cmaps)
-                                       yt    (ceil (- half-h (* ch k) 0.5))
-                                       yb    (- (ceil (- half-h (* fh k) 0.5)) 1)
-                                       top1  (max top (min yt (+ bot 1)))
-                                       bot1  (min bot (max yb (- top1 1)))
-                                       tops1 (if (> top1 top)
-                                                 (cons (if fsky
-                                                           (first (- top1 top) (drop top skycol))
-                                                           (flat-pixels ctab top (- top1 top) crows ray px py))
-                                                       tops)
-                                                 tops)
-                                       bots1 (if (> bot bot1)
-                                                 (cons (flat-pixels ftab (+ bot1 1) (- bot bot1) frows ray px py)
-                                                       bots)
-                                                 bots))
+                               (if fence (cons c nil) c)
+                               (withs (z       (/ 1 iz)
+                                       u       (* uz z)
+                                       k       (* focal-y iz)
+                                       step    (/ z focal-y)
+                                       cm      (nth (+ 1 (clamp (floor (- wstart (min (* 1280 iz) 23))) 0 31))
+                                                    cmaps)
+                                       yt      (ceil (- half-h (* ch k) 0.5))
+                                       yb      (- (ceil (- half-h (* fh k) 0.5)) 1)
+                                       top1    (max top (min yt (+ bot 1)))
+                                       bot1    (min bot (max yb (- top1 1)))
+                                       in      (<= x0 x x1)
+                                       tops1   (if (and in (> top1 top))
+                                                   (cons (if fsky
+                                                             (list 'sky (- top1 top) (drop top skycol))
+                                                             (cons 'flat (cons (- top1 top) (cons (drop top ctab) (cons crows ray)))))
+                                                         tops)
+                                                   tops)
+                                       bots1   (if (and in (> bot bot1))
+                                                   (cons (cons 'flat (cons (- bot bot1) (cons (drop (+ bot1 1) ftab) (cons frows ray))))
+                                                         bots)
+                                                   bots))
                                  (if bi
                                      (withs (ybc  (ceil (- half-h (* bch k) 0.5))
                                              ybf  (- (ceil (- half-h (* bfh k) 0.5)) 1)
                                              top2 (if (< bch ch) (max top1 (min ybc (+ bot1 1))) top1)
                                              bot2 (if (> bfh fh) (min bot1 (max ybf (- top2 1))) bot1))
-                                       (list (list top2
+                                       ((if fence
+                                            (fn (rec) (cons rec (if (<= top2 bot2) (list x iz u top2 bot2 cm))))
+                                            idfn)
+                                             (list top2
                                                    bot2
-                                                   (if (> top2 top1)
-                                                       (cons (wall-pixels upper (- top2 top1) top1 u
-                                                                          (+ ttop yoff) step cm half-h)
+                                                   (if (and in (> top2 top1))
+                                                       (cons (wall-span upper (- top2 top1) top1 u
+                                                                        (+ ttop yoff) step cm half-h)
                                                              tops1)
                                                        tops1)
-                                                   (if (> bot1 bot2)
-                                                       (cons (wall-pixels lower (- bot1 bot2) (+ bot2 1) u
-                                                                          (+ btop yoff) step cm half-h)
+                                                   (if (and in (> bot1 bot2))
+                                                       (cons (wall-span lower (- bot1 bot2) (+ bot2 1) u
+                                                                        (+ btop yoff) step cm half-h)
                                                              bots1)
                                                        bots1)
-                                                   (if (or (> top2 top) (< bot2 bot))
+                                                   (if (and in (or (> top2 top) (< bot2 bot)))
                                                        (cons (list iz top2 bot2) clips)
-                                                       clips))
-                                             (if (and mid (<= top2 bot2))
-                                                 (list x iz u top2 bot2 cm))))
-                                     (list (list (+ bot1 1)
+                                                       clips))))
+                                     (list (+ bot1 1)
                                                  bot1
-                                                 (if (>= bot1 top1)
-                                                     (cons (wall-pixels mid (- bot1 top1 -1) top1 u
-                                                                        (+ ttop yoff) step cm half-h)
+                                                 (if (and in (>= bot1 top1))
+                                                     (cons (wall-span mid (- bot1 top1 -1) top1 u
+                                                                      (+ ttop yoff) step cm half-h)
                                                            tops1)
                                                      tops1)
                                                  bots1
-                                                 (cons (list iz view-h -1) clips))
-                                           nil))))))
-                       (first n (drop xa cols))
-                       (iota-from n xa)
-                       (steps n iz diz)
-                       (steps n uz duz)
-                       (first n (drop xa skycols))
-                       (first n (drop xa rays)))
-          new     (map car results)
-          flags   (map [> (car _) (cadr _)] new)
-          mcols   (keep idfn (map cadr results)))
-    (list (append (first xa cols) new (drop (+ xb 1) cols))
-          (append (first xa solid) flags (drop (+ xb 1) solid))
-          (+ count (- (len (keep idfn flags)) (len (keep idfn (first n (drop xa solid))))))
+                                                 (if in (cons (list iz view-h -1) clips) clips))))))
+                        (if fence r (cons r nil))))
+                (cons rec (list (+ iz diz) (+ uz duz) (if m (cons m ms) ms)))))
+            (fn ((iz uz ms) k) (list (add-n iz diz k) (add-n uz duz k) ms))
+            (list iz uz nil)))
+    (list new
           planes
           (if mcols
-              (cons (list (/ 1 (cadr (nth (+ 1 (floor (/ (len mcols) 2))) (rev mcols))))
+              (cons (list (/ 1 (cadr (nth (+ 1 (floor (/ (len mcols) 2))) mcols)))
                           'masked
-                          (list mcols mid mtop))
+                          (list (rev mcols) mid mtop))
                     masked)
               masked)
           (adjoin fi seen))))
+
+; x after adding dx to it k times, as the columns' 1/z and u advance.
+(def add-n (x dx k)
+  (if (> k 0) (add-n (+ x dx) dx (- k 1)) x))
 
 (def iota-from (n x)
   (steps n x 1))
@@ -320,15 +471,15 @@
 
 ;;;; Sprites
 
-; Things in sectors we drew, and see-through middles, painted far to near
-; over the walls.  A sprite column at depth z is clipped by the newest wall
-; nearer than z in that column's clip records.
-(def draw-things (w v cols clips masked seen)
-  (foldl (fn ((z s m) cols)
+; Things in sectors we drew, and see-through middles, far to near, as
+; overlay runs added to the slice's columns.  A sprite column at depth z is
+; clipped by the newest wall nearer than z in that column's clip records.
+(def thing-runs (w v ovls clips masked seen)
+  (foldl (fn ((z s m) ovls)
            (if (= s 'masked)
-               (apply draw-masked cols v m)
-               (draw-sprite cols clips w v m z s)))
-         cols
+               (let (mcols tex mtop) m (masked-runs ovls v mcols tex mtop))
+               (sprite-runs ovls clips w v m z s)))
+         ovls
          (sort (fn (a b) (> (car a) (car b)))
                (append masked
                        (keep idfn (map [sprite-item _ v]
@@ -355,125 +506,156 @@
                  (* pi 0.25)))
        8))
 
-(def draw-sprite (cols clips w v m z s)
-  (withs ((px py vz vcos vsin heights lv angle skycols rays scr) v
+(def sprite-runs (ovls clips w v m z s)
+  (withs ((px py vz vcos vsin heights lv angle skycols rays scr x0 x1) v
           (width height view-h half-w half-h focal-x focal-y . srest) scr
           rots (cdr (get (sym (snoc (at 'sprite m) (thing-frame m (at 'tic w))))
                          (at 'sprite-frames lv))))
     (if (no rots)
-        cols
+        ovls
         (withs ((name . flip)     (or (nth (+ 1 (if (id (car rots) (cadr rots)) 0 (sprite-rotation m px py)))
                                            rots)
                                       (car rots))
                 (pw ph lo to pcols) (cdr (get name (at 'pictures lv)))
-                si    (at 'sec m)
+                si     (at 'sec m)
                 (flo cei) (nth (+ si 1) heights)
-                mz    (or (at 'z m) (if (= (at 'class m) 'hanging) (- cei to) flo))
+                mz     (or (at 'z m) (if (= (at 'class m) 'hanging) (- cei to) flo))
                 xscale (/ focal-x z)
                 xstep  (/ z focal-x)
                 yscale (/ focal-y z)
                 ystep  (/ z focal-y)
                 iz     (/ 1 z)
-                x1     (+ half-w (* (- s lo) xscale))
-                xa     (max 0 (ceil (- x1 0.5)))
-                xb     (min (- width 1) (- (ceil (- (+ x1 (* pw xscale)) 0.5)) 1))
+                x1s    (+ half-w (* (- s lo) xscale))
+                xa     (max x0 (ceil (- x1s 0.5)))
+                xb     (min x1 (- (ceil (- (+ x1s (* pw xscale)) 0.5)) 1))
                 ytop   (- half-h (* (- (+ mz to) vz) yscale))
                 ya0    (ceil (- ytop 0.5))
                 yb0    (- (ceil (- (+ ytop (* ph yscale)) 0.5)) 1)
-                cmaps (at 'colormaps lv)
-                cm    (if (at 'bright m)
-                          (car cmaps)
-                          (nth (+ 1 (clamp (floor (- (light-start (car (nth (+ si 1) (at 'sectors lv))))
-                                                     (min (* 1280 iz) 23)))
-                                           0 31))
-                               cmaps)))
+                cmaps  (at 'colormaps lv)
+                cm     (if (at 'bright m)
+                           (car cmaps)
+                           (nth (+ 1 (clamp (floor (- (light-start (car (nth (+ si 1) (at 'sectors lv))))
+                                                      (min (* 1280 iz) 23)))
+                                            0 31))
+                                cmaps)))
           (if (> xa xb)
-              cols
-              (overlay-columns
-                cols xa
-                (map (fn (x evs)
-                       (withs (tx        (clamp (floor (* (- (+ x 0.5) x1) xstep)) 0 (- pw 1))
-                               ev        (find [> (car _) iz] evs)
-                               (top bot) (if ev (cdr ev) (list 0 (- view-h 1)))
-                               ya        (max ya0 top)
-                               yb        (min yb0 bot))
-                         (if (<= ya yb)
-                             (cons ya (sprite-run (- yb ya -1) (* (- (+ ya 0.5) ytop) ystep) ystep
-                                                  (nth (+ 1 (if flip (- pw 1 tx) tx)) pcols) cm nil)))))
-                     (iota-from (- xb xa -1) xa)
-                     (first (- xb xa -1) (drop xa clips)))))))))
+              ovls
+              (add-runs
+                ovls (- xa x0)
+                (fn (x evs)
+                  (withs (tx        (clamp (floor (* (- (+ x 0.5) x1s) xstep)) 0 (- pw 1))
+                          ev        (find [> (car _) iz] evs)
+                          (top bot) (if ev (cdr ev) (list 0 (- view-h 1)))
+                          ya        (max ya0 top)
+                          yb        (min yb0 bot))
+                    (if (<= ya yb)
+                        (list ya (- yb ya -1)
+                              (sprite-texels (- yb ya -1) (* (- (+ ya 0.5) ytop) ystep) ystep
+                                             (nth (+ 1 (if flip (- pw 1 tx) tx)) pcols) cm nil)))))
+                (iota-from (- xb xa -1) xa)
+                (first (- xb xa -1) (drop (- xa x0) clips))))))))
 
-; Texels of a sprite column; nil where it is transparent.
-(def sprite-run (n v step pcol cm acc)
+; Texels of a sprite column top to bottom, consed bottom first onto acc;
+; nil where the sprite is transparent.
+(def sprite-texels (n v step pcol cm acc)
   (if (> n 0)
-      (sprite-run (- n 1) (+ v step) step pcol cm
-                  (cons (let c (car (drop (floor v) pcol))
-                          (if (and c (> c 0)) (nth c cm)))
-                        acc))
-      (rev acc)))
+      (sprite-texels (- n 1) (+ v step) step pcol cm
+                     (cons (let c (car (drop (floor v) pcol))
+                             (if (and c (> c 0)) (nth c cm)))
+                           acc))
+      acc))
 
-; Lay runs of pixels (nil = see-through) over columns xa onward; each
-; datum is (top-row . pixels) or nil.
-(def overlay-columns (cols xa data)
-  (let n (len data)
-    (append (first xa cols)
-            (map (fn (col d) (if d (overlay-pixels col (car d) (cdr d)) col))
-                 (first n (drop xa cols))
-                 data)
-            (drop (+ xa n) cols))))
-
-(def overlay-pixels (col ya pix)
-  (append (first ya col)
-          (map (fn (new old) (or new old)) pix (drop ya col))
-          (drop (+ ya (len pix)) col)))
+; Each column's overlay list from column ia on, with the run f makes from
+; that column's elements of lists added, when f makes one.
+(def add-runs (ovls ia f . lists)
+  (let n (len (car lists))
+    (append (first ia ovls)
+            (apply map (fn (l . args) (let r (apply f args) (if r (cons r l) l)))
+                   (first n (drop ia ovls))
+                   lists)
+            (drop (+ ia n) ovls))))
 
 ; The see-through middle texture of a two-sided line (grates, fences),
 ; drawn once between floor and ceiling.  Each column was recorded as
-; (x 1/z u top bottom colormap).
-(def draw-masked (cols v mcols tex mtop)
-  (let ((w h walls masked) (width height view-h half-w half-h focal-x focal-y . srest)) (list tex (nth 11 v))
-    (foldl (fn ((x iz u top bot cm) cols)
-             (withs (k    (* focal-y iz)
-                     ytop (- half-h (* mtop k))
-                     ya   (max top (ceil (- ytop 0.5)))
-                     yb   (min bot (- (ceil (- (+ ytop (* h k)) 0.5)) 1)))
-               (if (<= ya yb)
-                   (overlay-columns cols x
-                     (list (cons ya (sprite-run (- yb ya -1) (/ (- (+ ya 0.5) ytop) k) (/ 1 k)
-                                                (nth (+ 1 (mod (floor u) w)) masked) cm nil))))
-                   cols)))
-           cols
-           mcols)))
+; (x 1/z u top bottom colormap), in order of x.
+(def masked-runs (ovls v mcols tex mtop)
+  (withs ((w h walls masked) tex
+          (px py vz vcos vsin heights lv angle skycols rays scr x0 x1) v
+          (width height view-h half-w half-h focal-x focal-y . srest) scr
+          ms (keep [<= x0 (car _) x1] mcols))
+    (if (no ms)
+        ovls
+        (add-runs
+          ovls (- (car (car ms)) x0)
+          (fn (m)
+            (if m
+                (let (x iz u top bot cm) m
+                  (withs (k    (* focal-y iz)
+                          ytop (- half-h (* mtop k))
+                          ya   (max top (ceil (- ytop 0.5)))
+                          yb   (min bot (- (ceil (- (+ ytop (* h k)) 0.5)) 1)))
+                    (if (<= ya yb)
+                        (list ya (- yb ya -1)
+                              (sprite-texels (- yb ya -1) (/ (- (+ ya 0.5) ytop) k) (/ 1 k)
+                                             (nth (+ 1 (mod (floor u) w)) masked) cm nil)))))))
+          (align (car (car ms)) (car (last ms)) ms nil)))))
+
+; For each x from x to xb, the entry of ms (in order of x) for that x, or nil.
+(def align (x xb ms acc)
+  (if (> x xb)
+      (rev acc)
+      (and ms (= (car (car ms)) x))
+      (align (+ x 1) xb (cdr ms) (cons (car ms) acc))
+      (align (+ x 1) xb ms (cons nil acc))))
 
 ;;;; Pictures: the weapon and the status bar
 
-; The pixels of a picture placed at Doom's 320x200 screen coordinates,
-; sampled through the screen's maps, over screen rows ya..yb:
-; (first-column . data) for overlay-columns, with rows counted from row0.
-(def picture-data (pic x y cm ya yb row0 scr)
-  (let ((w h lo to cols) (width height view-h half-w half-h focal-x focal-y xmap ymap)) (list pic scr)
-    (withs (left (floor (- x lo))
-            top  (floor (- y to))
-            xs   (keep [<= left (nth (+ _ 1) xmap) (+ left w -1)] (iota width))
-            ys   (keep [<= top (nth (+ _ 1) ymap) (+ top h -1)] (iota-from (- yb ya -1) ya))
-            src  (map [- (nth (+ _ 1) ymap) top] ys))
-      (if (and xs ys)
-          (cons (car xs)
-                (map [let pcol (nth (+ 1 (- (nth (+ _ 1) xmap) left)) cols)
-                       (cons (- (car ys) row0)
-                             (map [let c (nth (+ _ 1) pcol) (if (> c 0) (nth c cm))] src))]
-                     xs))))))
+; Draw a picture placed at Doom's 320x200 screen coordinates, sampled
+; through the screen's maps, over screen rows ya..yb, onto the columns of
+; screen columns x0..x1, whose first row is row0: the status bar, which is
+; only redrawn when it changes.
+(def draw-picture (cols lv name x y cm ya yb row0 scr x0 x1 tab)
+  (withs ((w h lo to pcols) (cdr (get name (at 'pictures lv)))
+          (width height view-h half-w half-h focal-x focal-y xmap ymap) scr
+          left (floor (- x lo))
+          top  (floor (- y to))
+          xs   (keep [<= left (nth (+ _ 1) xmap) (+ left w -1)] (iota-from (- x1 x0 -1) x0))
+          ys   (keep [<= top (nth (+ _ 1) ymap) (+ top h -1)] (iota-from (- yb ya -1) ya))
+          src  (map [- (nth (+ _ 1) ymap) top] ys)
+          r0   (if ys (- (car ys) row0)))
+    (if (and xs ys)
+        (update-columns cols (- (car xs) x0)
+          (fn (col sx)
+            (overlay-run col r0 (len ys)
+                     (picture-run src (nth (+ 1 (- (nth (+ sx 1) xmap) left)) pcols) cm tab
+                                  (drop r0 col) nil)))
+          xs)
+        cols)))
 
-(def draw-picture (cols lv name x y cm ya yb row0 scr)
-  (let d (picture-data (cdr (get name (at 'pictures lv))) x y cm ya yb row0 scr)
-    (if d (overlay-columns cols (car d) (cdr d)) cols)))
+; col with its n rows from row ya replaced by the run racc, bottom first.
+(def overlay-run (col ya n racc)
+  (append (first ya col) (foldl cons (drop (+ ya n) col) racc)))
+
+; Columns xa onward replaced by f of each column and the elements of lists.
+(def update-columns (cols xa f . lists)
+  (let n (len (car lists))
+    (append (first xa cols)
+            (apply map f (first n (drop xa cols)) lists)
+            (drop (+ xa n) cols))))
+
+(def picture-run (src pcol cm tab bg acc)
+  (if src
+      (picture-run (cdr src) pcol cm tab (cdr bg)
+                   (cons (let c (nth (+ (car src) 1) pcol)
+                           (if (> c 0) (tinted (nth c cm) tab) (car bg)))
+                         acc))
+      acc))
 
 (set pistol-frames (map [cons _ (sym (list \P \I \S \G _ \0))] "ABC"))
 
-(def draw-weapon (w cols)
+(def weapon-runs (w v ovls)
   (if (> (at 'health w) 0)
-      (withs (lv    (at 'lv w)
-              scr   (at 'screen w)
+      (withs ((px py vz vcos vsin heights lv angle skycols rays scr x0 x1) v
               vh    (caddr scr)
               wt    (at 'wtics w)
               frame (if (> wt 9) \B (> wt 5) \C (> wt 2) \B \A)
@@ -485,11 +667,34 @@
               cm    (nth (+ 1 (clamp (- (light-start (car (nth (+ 1 (at 'psec w)) (at 'sectors lv)))) 23)
                                      0 31))
                          cmaps)
-              lit   (if (> wt 9)
-                        (draw-picture cols lv 'PISFA0 (+ 1 bx) (+ 16 by) (car cmaps) 0 (- vh 1) 0 scr)
-                        cols))
-        (draw-picture lit lv (cdr (get frame pistol-frames)) (+ 1 bx) (+ 16 by) cm 0 (- vh 1) 0 scr))
-      cols))
+              flash (if (> wt 9)
+                        (picture-runs ovls lv 'PISFA0 (+ 1 bx) (+ 16 by) (car cmaps) (- vh 1) scr x0 x1)
+                        ovls))
+        (picture-runs flash lv (cdr (get frame pistol-frames)) (+ 1 bx) (+ 16 by) cm (- vh 1) scr x0 x1))
+      ovls))
+
+; A picture placed at Doom's 320x200 screen coordinates, sampled through
+; the screen's maps over view rows 0..yb, as overlay runs.
+(def picture-runs (ovls lv name x y cm yb scr x0 x1)
+  (withs ((w h lo to pcols) (cdr (get name (at 'pictures lv)))
+          (width height view-h half-w half-h focal-x focal-y xmap ymap) scr
+          left (floor (- x lo))
+          top  (floor (- y to))
+          xs   (keep [<= left (nth (+ _ 1) xmap) (+ left w -1)] (iota-from (- x1 x0 -1) x0))
+          ys   (keep [<= top (nth (+ _ 1) ymap) (+ top h -1)] (iota-from (+ yb 1) 0))
+          src  (map [- (nth (+ _ 1) ymap) top] ys))
+    (if (and xs ys)
+        (add-runs ovls (- (car xs) x0)
+          (fn (sx)
+            (list (car ys) (len ys)
+                  (picture-texels src (nth (+ 1 (- (nth (+ sx 1) xmap) left)) pcols) cm nil)))
+          xs)
+        ovls)))
+
+(def picture-texels (src pcol cm acc)
+  (if src
+      (picture-texels (cdr src) pcol cm (cons (let c (nth (+ (car src) 1) pcol) (if (> c 0) (nth c cm))) acc))
+      acc))
 
 ; Doom flashes the palette red when you are hurt and gold when you pick
 ; something up.  We have one palette, so we remap the view through a table
@@ -502,9 +707,6 @@
                                rgb)))
        rgb))
 
-(def tint (cols tab)
-  (map [map [nth (+ 1 (charn _)) tab] _] cols))
-
 (set digits (map [sym (snoc "STTNUM" (nchar (+ 48 _)))] (iota 10)))
 
 ; The status bar: STBAR, the arms panel, ammo, health and armor in big red
@@ -512,7 +714,8 @@
 (def hud-columns (lv state scr)
   (let ((health armor ammo face) (width height view-h . srest)) (list state scr)
     (withs (cm   (car (at 'colormaps lv))
-            draw (fn (cols name x y) (draw-picture cols lv name x y cm view-h (- height 1) view-h scr))
+            draw (fn (cols name x y) (draw-picture cols lv name x y cm view-h (- height 1) view-h scr
+                                                   0 (- width 1) nil))
             bar  (foldl (fn ((name x y) cols) (draw cols name x y))
                         (fill width (fill (- height view-h) (nchar 0)))
                         (list '(STBAR 0 168) '(STARMS 104 168)

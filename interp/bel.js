@@ -146,7 +146,7 @@ class ContThrow {
 }
 
 class MacroCache {
-  constructor(m, exp) { this.m = m; this.exp = exp; }
+  constructor(m, exp) { this.m = m; this.exp = exp; this.ep = CODE_EPOCH; }
 }
 
 const symtab = new Map();
@@ -201,6 +201,10 @@ LET.sf = SF_LET; RFN.sf = SF_RFN;
 for (const s of [FN, DO, SET, DEF, MAC, LET, RFN]) s.nat = true;
 
 let VMARK = undefined;   // the value of the global vmark, once bel.bel sets it
+const DYN_UVARS = new WeakSet();  // uvars that have ever been bound dynamically
+let JIT_GEN = 0;         // bumps when a compiled function's assumptions may have changed
+let ENV_EPOCH = 0;       // bumps on any xar/xdr, invalidating cached environment cells
+let CODE_EPOCH = 0;      // bumps when a pair inside compiled code is mutated
 let loading = true;      // true while bel.bel itself is being loaded
 const dyn = [];          // dynamic binding cells, innermost last
 
@@ -260,7 +264,7 @@ let errContext = null;   // parameter list being bound, for error messages only
 
 function sigerr(msg) {
   for (let i = dyn.length - 1; i >= 0; i--) {
-    if (dyn[i].a === ERR) return applyF(dyn[i].d, [msg]);
+    if (dyn[i].a === ERR) { errContext = null; return applyF(dyn[i].d, [msg]); }
   }
   let text = 'Bel error: ' + printString(msg);
   if (errContext !== null && (msg === sym('underargs') || msg === sym('overargs') || msg === sym('atom-arg') || msg === sym('mistype'))) {
@@ -293,14 +297,18 @@ function globalCell(s) {
   return s.gcell;
 }
 
+const isMacroVal = (x) => x instanceof Pair && x.a === LIT && x.d instanceof Pair && x.d.a === MAC;
+
 function setGlobal(s, v) {
   const c = globalCell(s);
+  if (s.sf || isMacroVal(c.d) || isMacroVal(v)) JIT_GEN++;
   c.d = v;
   if (!loading) s.nat = false;
   if (s === VMARK_SYM) VMARK = v;
 }
 
 function assignCell(c, v) {
+  if (c.a instanceof Sym && c.a.gcell === c && (c.a.sf || isMacroVal(c.d) || isMacroVal(v))) JIT_GEN++;
   c.d = v;
   if (c.a instanceof Sym) {
     if (c.a.gcell === c) {
@@ -311,7 +319,7 @@ function assignCell(c, v) {
 }
 
 function bindVar(v, val, env) {
-  if (v instanceof Sym) v.lexb = true;
+  if (v instanceof Sym) if (!v.lexb) { v.lexb = true; JIT_GEN++; }
   return new Pair(new Pair(v, val), env);
 }
 
@@ -329,7 +337,7 @@ function bind(parms, args, env) {
       errContext = null;
       return r;
     }
-    v.lexb = true;
+    if (!v.lexb) { v.lexb = true; JIT_GEN++; }
     env = new Pair(new Pair(v, args[i++]), env);
     p = p.d;
   }
@@ -338,7 +346,7 @@ function bind(parms, args, env) {
     return env;
   }
   if (p instanceof Sym && !p.lit) {
-    p.lexb = true;
+    if (!p.lexb) { p.lexb = true; JIT_GEN++; }
     return new Pair(new Pair(p, arrToList(args, i)), env);
   }
   errContext = parms;
@@ -354,14 +362,14 @@ function pass(pat, arg, env) {
     while (p instanceof Pair && q instanceof Pair) {
       const v = p.a;
       if (!(v instanceof Sym) || v.lit) break;
-      v.lexb = true;
+      if (!v.lexb) { v.lexb = true; JIT_GEN++; }
       e2 = new Pair(new Pair(v, q.a), e2);
       p = p.d;
       q = q.d;
     }
     if (p === NIL && q === NIL) return e2;
     if (p instanceof Sym && !p.lit && (q === NIL || q instanceof Pair)) {
-      p.lexb = true;
+      if (!p.lexb) { p.lexb = true; JIT_GEN++; }
       return new Pair(new Pair(p, q), e2);
     }
   }
@@ -484,7 +492,8 @@ function ev(e, a, w) {
             const v = e.d.a;
             if (!isVariable(v)) return sigerr(sym('cannot-bind'));
             const val = ev(e.d.d.a, a, false);
-            if (v instanceof Sym) v.dynb = true;
+            if (v instanceof Sym) { if (!v.dynb) { v.dynb = true; JIT_GEN++; } }
+            else if (!DYN_UVARS.has(v)) { DYN_UVARS.add(v); JIT_GEN++; }
             dyn.push(new Pair(v, val));
             const depth = dyn.length;
             try {
@@ -533,7 +542,7 @@ function ev(e, a, w) {
             const val = ev(e.d.d.a, a, false);
             const parms = e.d.a;
             if (parms instanceof Sym && !parms.lit) {
-              parms.lexb = true;
+              if (!parms.lexb) { parms.lexb = true; JIT_GEN++; }
               a = new Pair(new Pair(parms, val), a);
             } else {
               a = pass(parms, val, a);
@@ -592,7 +601,7 @@ function ev(e, a, w) {
             let i = 0;
             for (let p = e.d.a; p instanceof Pair; p = p.d.d) {
               const v = p.a;
-              if (v instanceof Sym && !v.lit) { v.lexb = true; a = new Pair(new Pair(v, vals[i++]), a); }
+              if (v instanceof Sym && !v.lit) { if (!v.lexb) { v.lexb = true; JIT_GEN++; } a = new Pair(new Pair(v, vals[i++]), a); }
               else a = pass(v, vals[i++], a);
             }
             let body = e.d.d;
@@ -605,7 +614,7 @@ function ev(e, a, w) {
             for (let p = e.d.a; p instanceof Pair; p = p.d.d) {
               const v = p.a;
               const val = ev(p.d instanceof Pair ? p.d.a : NIL, a, false);
-              if (v instanceof Sym && !v.lit) { v.lexb = true; a = new Pair(new Pair(v, val), a); }
+              if (v instanceof Sym && !v.lit) { if (!v.lexb) { v.lexb = true; JIT_GEN++; } a = new Pair(new Pair(v, val), a); }
               else a = pass(v, val, a);
             }
             let body = e.d.d;
@@ -619,7 +628,7 @@ function ev(e, a, w) {
             let i = ev(e.d.d.a, a, false);
             const mx = ev(e.d.d.d.a, a, false);
             const body = e.d.d.d.d;
-            if (v instanceof Sym) v.lexb = true;
+            if (v instanceof Sym) if (!v.lexb) { v.lexb = true; JIT_GEN++; }
             while (!less(mx, i)) {
               const cell = new Pair(v, i);
               const a2 = new Pair(cell, a);
@@ -652,7 +661,7 @@ function ev(e, a, w) {
             const update = sf === SF_TIL ? init : e.d.d.d.a;
             const test = sf === SF_TIL ? e.d.d.d.a : e.d.d.d.d.a;
             const body = sf === SF_TIL ? e.d.d.d.d : e.d.d.d.d.d;
-            if (v instanceof Sym) v.lexb = true;
+            if (v instanceof Sym) if (!v.lexb) { v.lexb = true; JIT_GEN++; }
             let val = ev(init, a, false);
             for (;;) {
               const a2 = isVariable(v) && v instanceof Sym ? new Pair(new Pair(v, val), a) : pass(v, val, a);
@@ -666,7 +675,7 @@ function ev(e, a, w) {
           case SF_RFN: {
             const name = e.d.a;
             const cell = new Pair(name, NIL);
-            if (name instanceof Sym) name.lexb = true;
+            if (name instanceof Sym) if (!name.lexb) { name.lexb = true; JIT_GEN++; }
             const env = new Pair(cell, a);
             const clo = makeClo(env, e.d.d.a, fnBody(e.d));
             cell.d = clo;
@@ -696,10 +705,11 @@ function ev(e, a, w) {
     if (f instanceof Pair && f.a === LIT && f.d instanceof Pair && f.d.a === MAC) {
       const mc = e.x;
       let exp;
-      if (mc instanceof MacroCache && mc.m === f) {
+      if (mc instanceof MacroCache && mc.m === f && mc.ep === CODE_EPOCH) {
         exp = mc.exp;
       } else {
         exp = applyF(f.d.d.a, listToArr(e.d));
+        markCodeTree(e);
         e.x = new MacroCache(f, exp);
       }
       e = exp;
@@ -722,6 +732,10 @@ function ev(e, a, w) {
           return nf(args);
         }
         if (tag === CLO) {
+          if (JSTIER && !w) {
+            const code = jitOf(f);
+            if (code !== null) return finishTC(code(f, args));
+          }
           const r = f.d.d;
           a = bind(r.d.a, args, r.a);
           e = r.d.d.a;
@@ -784,6 +798,10 @@ function applyF(f, args) {
         return f.x(args);
       }
       if (tag === CLO) {
+        if (JSTIER) {
+          const code = jitOf(f);
+          if (code !== null) return finishTC(code(f, args));
+        }
         const r = f.d.d;
         const env = bind(r.d.a, args, r.a);
         return COMPILE ? run(comp(r.d.d.a), env) : ev(r.d.d.a, env, false);
@@ -853,6 +871,7 @@ function assign(p, v, a) {
   const loc = ev(p, a, 2);
   const cell = loc.a, which = loc.d.a;
   if (!(cell instanceof Pair)) return sigerr(sym('bad-place'));
+  noteMutation(cell);
   if (which === A) cell.a = v;
   else if (which === D) { if (cell.k) epoch++; assignCell(cell, v); }
   else return sigerr(sym('bad-place'));
@@ -947,24 +966,41 @@ function globeList() {
 // JS stack, and run() trampolines it.  Anything unusual (where-mode, dyn,
 // after, ccc, def, mac) is delegated to ev, so the two agree by construction.
 
-let COMPILE = !(typeof process !== 'undefined' && process.env && process.env.BEL_NOCOMPILE);
-const TC = { env: null, node: null };
+const ENV = typeof process !== 'undefined' && process.env ? process.env : {};
+let COMPILE = !ENV.BEL_NOCOMPILE && ENV.BEL_TIER !== 'ev';
+let JSTIER = COMPILE && ENV.BEL_TIER !== 'closure';
+// Pending tail call: kind 1 is a closure-tier body (env, node), kind 2 a
+// compiled function (code, clo, args).
+const TC = { k: 1, env: null, node: null, code: null, clo: null, args: null };
 
-function run(node, env) {
-  let r = node(env, true);
+function finishTC(r) {
   while (r === TC) {
-    const n = TC.node, e = TC.env;
-    r = n(e, true);
+    if (TC.k === 2) {
+      const code = TC.code, clo = TC.clo, args = TC.args;
+      TC.code = null; TC.clo = null; TC.args = null;
+      r = code(clo, args);
+    } else {
+      const n = TC.node, e = TC.env;
+      r = n(e, true);
+    }
   }
   return r;
+}
+
+function run(node, env) {
+  return finishTC(node(env, true));
 }
 
 function comp(e) {
   if (e instanceof Sym) return e.cnode || (e.cnode = compSym(e));
   if (!(e instanceof Pair)) return () => e;
-  if (e.c !== null) return e.c;
-  e.c = (a, t) => e.c === null ? ev(e, a, 0) : ev(e, a, 0);  // placeholder while compiling
+  if (e.c !== null && e.c.ep === CODE_EPOCH) return e.c;
+  const ph = (a) => ev(e, a, 0);  // placeholder while compiling
+  ph.ep = CODE_EPOCH;
+  e.c = ph;
+  markCodeTree(e);
   const n = compPair(e);
+  n.ep = CODE_EPOCH;
   e.c = n;
   return n;
 }
@@ -1016,10 +1052,15 @@ function applyT(f, args, t) {
       const x = f.x;
       if (typeof x === 'function') return x(args);
       if (f.a === LIT && f.d instanceof Pair && f.d.a === CLO) {
+        const code = JSTIER ? jitOf(f) : null;
+        if (code !== null) {
+          if (t) { TC.k = 2; TC.code = code; TC.clo = f; TC.args = args; return TC; }
+          return finishTC(code(f, args));
+        }
         const r = f.d.d;
         const env = bind(r.d.a, args, r.a);
         const body = comp(r.d.d.a);
-        if (t) { TC.env = env; TC.node = body; return TC; }
+        if (t) { TC.k = 1; TC.env = env; TC.node = body; return TC; }
         return run(body, env);
       }
       return applyF(f, args);
@@ -1039,8 +1080,9 @@ function applyT(f, args, t) {
 
 function expandCached(e, f) {
   const mc = e.x;
-  if (mc instanceof MacroCache && mc.m === f) return mc.exp;
+  if (mc instanceof MacroCache && mc.m === f && mc.ep === CODE_EPOCH) return mc.exp;
   const exp = applyF(f.d.d.a, listToArr(e.d));
+  markCodeTree(e);
   e.x = new MacroCache(f, exp);
   return exp;
 }
@@ -1068,16 +1110,16 @@ function compCall(e) {
         if (tag === CLO) {
           const args = new Array(n);
           for (let i = 0; i < n; i++) args[i] = argn[i](a, false);
+          const code = JSTIER ? jitOf(f) : null;
+          if (code !== null) {
+            if (t) { TC.k = 2; TC.code = code; TC.clo = f; TC.args = args; return TC; }
+            return finishTC(code(f, args));
+          }
           const r = f.d.d;
           const env = bind(r.d.a, args, r.a);
           const body = comp(r.d.d.a);
-          if (t) { TC.env = env; TC.node = body; return TC; }
-          let v = body(env, true);
-          while (v === TC) {
-            const nb = TC.node, ne = TC.env;
-            v = nb(ne, true);
-          }
-          return v;
+          if (t) { TC.k = 1; TC.env = env; TC.node = body; return TC; }
+          return finishTC(body(env, true));
         }
       }
     }
@@ -1153,7 +1195,7 @@ function compIf(e) {
 
 function bindPat(v, val, a) {
   if (v instanceof Sym && !v.lit) {
-    v.lexb = true;
+    if (!v.lexb) { v.lexb = true; JIT_GEN++; }
     return new Pair(new Pair(v, val), a);
   }
   errContext = v;
@@ -1201,7 +1243,7 @@ function compCore(e, sf) {
       const body = fnBody(e.d);
       return (a) => {
         const cell = new Pair(name, NIL);
-        if (name instanceof Sym) name.lexb = true;
+        if (name instanceof Sym) if (!name.lexb) { name.lexb = true; JIT_GEN++; }
         const clo = makeClo(new Pair(cell, a), parms, body);
         cell.d = clo;
         return clo;
@@ -1279,7 +1321,7 @@ function compCore(e, sf) {
       return (a) => {
         let i = initn(a, false);
         const mx = maxn(a, false);
-        if (v instanceof Sym) v.lexb = true;
+        if (v instanceof Sym) if (!v.lexb) { v.lexb = true; JIT_GEN++; }
         while (!less(mx, i)) {
           const cell = new Pair(v, i);
           const a2 = new Pair(cell, a);
@@ -1313,6 +1355,927 @@ function compCore(e, sf) {
     default:
       return (a) => ev(e, a, 0);
   }
+}
+
+
+// ---------------------------------------------------------------- tier 2: Bel to JavaScript
+//
+// A closure that runs often is compiled to JavaScript source when its body
+// can be compiled without changing what Bel programs can observe:
+//
+// - In bodies that create no closures and never mention `scope`, parameters
+//   and `let` variables are JS locals: no alist cells. Other bodies compile in
+//   cells mode: every variable is a real (name . value) pair on a real alist,
+//   built exactly as ev builds it, because a closure's environment is the
+//   whole alist in scope when it is created and Bel programs can take it apart.
+// - Free variables are read through the closure's real environment cells
+//   (cached per closure, re-resolved after any xar/xdr), globals through
+//   their global cells.
+// - Macros are expanded at compile time (the same memoized expansion the
+//   other tiers use) behind guards; forms that need a real environment
+//   (where, place set, dyn, after, ccc, bquote, til, loop) run in `ev` on an
+//   alist built from the current locals, whose values are copied back.
+// - Hot jets are inlined behind a per-use identity check on the global's
+//   value, falling back to the jet itself for anything unusual.
+// - Tail calls use the shared trampoline, self tail calls become loops, and
+//   (cons x (self ...)) in tail position becomes a loop that builds the list
+//   in place (tail recursion modulo cons), so recursive list functions like
+//   bel.bel's map run in constant stack.
+// - Any change to an assumption (a symbol bound dynamically or lexically for
+//   the first time, a macro or core macro redefined, compiled code mutated)
+//   bumps a generation; a compiled function re-checks its assumptions on its
+//   next call and falls back to the closure tier if they no longer hold.
+
+const JIT_THRESHOLD = 16;
+const codePairs = new WeakSet();
+// Marks every pair of a piece of code (not inside quote) so that changing it
+// in place invalidates compiled nodes, macro expansions and compiled bodies.
+// A marked pair always has its whole subtree marked, so marking stops early.
+function markCodeTree(e) {
+  let p = e;
+  while (p instanceof Pair && !codePairs.has(p)) {
+    codePairs.add(p);
+    if (p.a instanceof Pair && p.a.a !== QUOTE) markCodeTree(p.a);
+    p = p.d;
+  }
+}
+
+function noteMutation(p) {
+  ENV_EPOCH++;
+  R.ee = ENV_EPOCH;
+  if (codePairs.has(p)) CODE_EPOCH++;
+}
+
+class JitEntry {
+  constructor(parms, body) {
+    this.parms = parms; this.body = body; this.calls = 0; this.code = null; this.dead = false;
+    this.gen = -1; this.epoch = -1; this.check = null; this.recompiles = 0;
+  }
+}
+const jitTable = new WeakMap();
+
+class CloCache {
+  constructor(je) { this.je = je; this.ep = -1; this.cells = null; this.free = null; }
+}
+
+const jitStats = { compiled: 0, rejected: 0, invalidated: 0, reasons: new Map() };
+
+function jitOf(f) {
+  let cc = f.x;
+  if (!(cc instanceof CloCache)) {
+    if (cc !== null) return null;
+    const r = f.d.d;
+    if (!(r instanceof Pair) || !(r.d instanceof Pair) || !(r.d.d instanceof Pair)) return null;
+    const parms = r.d.a, body = r.d.d.a;
+    if (!(body instanceof Pair)) return null;
+    let je = jitTable.get(body);
+    if (je === undefined) { je = new JitEntry(parms, body); jitTable.set(body, je); }
+    else if (je.parms !== parms) return null;
+    cc = new CloCache(je);
+    cc.ep = ENV_EPOCH;
+    f.x = cc;
+  }
+  const je = cc.je;
+  if (je.dead) return null;
+  if (cc.ep !== ENV_EPOCH) {
+    const r = f.d.d;
+    if (!(r instanceof Pair) || !(r.d instanceof Pair) || !(r.d.d instanceof Pair) || r.d.a !== je.parms || r.d.d.a !== je.body) {
+      f.x = null;
+      return null;
+    }
+    cc.ep = ENV_EPOCH;
+    cc.cells = null;
+    cc.free = null;
+  }
+  if (je.code === null) {
+    if (++je.calls < JIT_THRESHOLD) return null;
+    let res = null;
+    try {
+      try {
+        res = jitCompile(je.parms, je.body, false);
+      } catch (ex) {
+        if (!(ex instanceof JitReject) || ex.message !== 'creates a closure') throw ex;
+        res = jitCompile(je.parms, je.body, true);
+      }
+    } catch (ex) {
+      if (!(ex instanceof JitReject)) throw ex;
+      jitStats.rejected++;
+      jitStats.reasons.set(ex.message, (jitStats.reasons.get(ex.message) || 0) + 1);
+    }
+    if (res === null) { je.dead = true; return null; }
+    jitStats.compiled++;
+    je.code = res.code; je.check = res.check; je.gen = JIT_GEN; je.epoch = CODE_EPOCH;
+  }
+  if (je.epoch !== CODE_EPOCH || (je.gen !== JIT_GEN && !je.check())) {
+    jitStats.invalidated++;
+    je.code = null; je.calls = 0;
+    if (++je.recompiles > 8) je.dead = true;
+    return null;
+  }
+  je.gen = JIT_GEN;
+  return je.code;
+}
+
+class JitReject extends Error {}
+const reject = (why) => { throw new JitReject(why); };
+
+// Runtime support for generated code.
+const R = {
+  NIL: null, T: null, Pair,
+  slow(clo, args) {
+    const r = clo.d.d;
+    return run(comp(r.d.d.a), bind(r.d.a, args, r.a));
+  },
+  rest(args, n) { return arrToList(args, n); },
+  cells(clo, syms) {
+    const cc = clo.x;
+    if (cc instanceof CloCache && cc.free === syms && cc.ep === ENV_EPOCH) return cc.cells;
+    const env = clo.d.d.a;
+    const cells = new Array(syms.length);
+    for (let i = 0; i < syms.length; i++) {
+      const s = syms[i];
+      let c = null;
+      for (let p = env; p instanceof Pair; p = p.d) if (p.a instanceof Pair && p.a.a === s) { c = p.a; break; }
+      cells[i] = c !== null ? c : s.gcell;
+    }
+    if (cc instanceof CloCache) { cc.cells = cells; cc.free = syms; cc.ep = ENV_EPOCH; }
+    return cells;
+  },
+  unb(s) {
+    if (s.gcell !== null) return s.gcell.d;
+    if (s === SCOPE || s === GLOBE) return ev(s, NIL, 0);
+    return sigerr(list(UNBOUNDB, s));
+  },
+  assign(c, v) { assignCell(c, v); return v; },
+  setg(s, v) {
+    if (s.gcell !== null) assignCell(s.gcell, v);
+    else setGlobal(s, v);
+    return v;
+  },
+  call(f, args) {
+    if (f instanceof Pair) {
+      const x = f.x;
+      if (typeof x === 'function') return x(args);
+      if (f.a === LIT && f.d instanceof Pair && f.d.a === CLO) {
+        if (JSTIER) {
+          const code = jitOf(f);
+          if (code !== null) return finishTC(code(f, args));
+        }
+        const r = f.d.d;
+        return run(comp(r.d.d.a), bind(r.d.a, args, r.a));
+      }
+    }
+    return applyF(f, args);
+  },
+  tail(f, args) {
+    if (f instanceof Pair) {
+      const x = f.x;
+      if (typeof x === 'function') return x(args);
+      if (f.a === LIT && f.d instanceof Pair && f.d.a === CLO) {
+        const code = JSTIER ? jitOf(f) : null;
+        if (code !== null) { TC.k = 2; TC.code = code; TC.clo = f; TC.args = args; return TC; }
+        const r = f.d.d;
+        const env = bind(r.d.a, args, r.a);
+        const body = comp(r.d.d.a);
+        TC.k = 1; TC.env = env; TC.node = body;
+        return TC;
+      }
+    }
+    return applyT(f, args, true);
+  },
+  isMac: isMacroVal,
+  // Build a real alist from the closure's environment plus the given locals
+  // (outermost first), for forms that must run in ev.
+  mat(clo, pairs) {
+    let env = clo.d.d.a;
+    const cells = [];
+    for (let i = 0; i < pairs.length; i += 2) {
+      const c = new Pair(pairs[i], pairs[i + 1]);
+      cells.push(c);
+      env = new Pair(c, env);
+    }
+    return { env, c: cells };
+  },
+  evm(form, m) { return ev(form, m.env, 0); },
+  destr(pat, val) { return pass(pat, val, NIL); },
+  eg(env, s) {
+    for (let p = env; p instanceof Pair; p = p.d) if (p.a instanceof Pair && p.a.a === s) return p.a.d;
+    return NIL;
+  },
+  ee: 0,
+  lk(env, s) {
+    for (let p = env; p instanceof Pair; p = p.d) if (p.a instanceof Pair && p.a.a === s) return p.a.d;
+    return R.unb(s);
+  },
+  setIn(env, s, v) {
+    for (let p = env; p instanceof Pair; p = p.d) if (p.a instanceof Pair && p.a.a === s) { assignCell(p.a, v); return v; }
+    return R.setg(s, v);
+  },
+  cellIn(env, s) {
+    for (let p = env; p instanceof Pair; p = p.d) if (p.a instanceof Pair && p.a.a === s) return p.a;
+    return new Pair(s, NIL);
+  },
+  destr2(pat, val, env) { return pass(pat, val, env); },
+  evEnv(form, env) { return ev(form, env, 0); },
+  mkclo(env, parms, body) { return makeClo(env, parms, body); },
+  mkrfn(env, name, parms, body) {
+    const cell = new Pair(name, NIL);
+    const clo = makeClo(new Pair(cell, env), parms, body);
+    cell.d = clo;
+    return clo;
+  },
+  globe() { return globeList(); },
+  uv(env, u) {
+    for (let i = dyn.length - 1; i >= 0; i--) if (dyn[i].a === u) return dyn[i].d;
+    for (let p = env; p instanceof Pair; p = p.d) if (p.a instanceof Pair && p.a.a === u) return p.a.d;
+    return sigerr(sym('unbound'));
+  },
+  less(a, b) { return less(a, b); },
+  mistype() { return sigerr(sym('mistype')); },
+  num(x) { return num(x); },
+  nth,
+  mod(x, y) {
+    if (y !== 0 && Number.isInteger(x) && Number.isInteger(y)) return ((x % y) + y) % y;
+    return null;
+  },
+};
+
+const CORE_FORMS = new Set([FN, DO, SET, DEF, MAC, LET, RFN, WHEN, UNLESS, AND, OR, CASE, WITH, WITHS, FOR, WHILE, REPEAT, TIL, LOOP]);
+const FALLBACK_FORMS = new Set([WHERE, DYN, AFTER, CCC, BQUOTE, TIL, LOOP]);
+const DANGEROUS = new Set(['fn', 'rfn', 'afn', 'def', 'mac', 'macro', 'scope', 'globe', 'thread', 'loc', 'vir', 'form', 'syn', 'com']);
+
+function jitCompile(parms, body, CELLS) {
+  const K = [];
+  const kmap = new Map();
+  const k = (v) => {
+    let i = kmap.get(v);
+    if (i === undefined) { i = K.length; K.push(v); kmap.set(v, i); }
+    return `K[${i}]`;
+  };
+  const varSyms = new Set();      // every symbol read or written as a variable
+  const globalSyms = new Set();   // free symbols assumed global (never lexically bound)
+  const macroGuards = new Map();  // symbol -> macro value expanded at compile time
+  const coreSyms = new Set();     // core macros compiled natively
+  const funSyms = new Set();      // global operators assumed not to be macros
+  const freeSyms = [];            // free lexical symbols, resolved through the closure env
+  const freeIndex = new Map();
+  const hoisted = [];
+  let tmpN = 0, varN = 0;
+  const tmp = () => { const n = `$t${tmpN++}`; hoisted.push(n); return n; };
+  const fresh = (s) => { const n = `v${varN++}_${((s instanceof Sym ? s.name : "uvar").replace(/[^A-Za-z0-9_]/g, '_')).slice(0, 12)}`; hoisted.push(n); return n; };
+
+  const isUvar = (x) => x instanceof Pair && VMARK !== undefined && x.a === VMARK;
+  const isVarSym = (x) => (x instanceof Sym && !x.lit) || isUvar(x);
+
+  // scope: array of [sym, jsname], innermost last
+  const lookupLocal = (scope, s) => {
+    for (let i = scope.length - 1; i >= 0; i--) if (scope[i][0] === s) return scope[i][1];
+    return null;
+  };
+
+  const markCode = markCodeTree;
+  markCode(parms);
+  markCode(body);
+
+  // Parameters. Simple ones (plain symbols, optional rest) bind straight from
+  // the argument array and allow self-call loops; optional (o x d), typed
+  // (t x f) and destructured parameters bind in the entry prologue.
+  const params = [];
+  let restSym = null;
+  let simpleParams = true;
+  {
+    let p = parms;
+    while (p instanceof Pair) {
+      if (!isVarSym(p.a)) simpleParams = false;
+      params.push(p.a);
+      p = p.d;
+    }
+    if (p !== NIL) {
+      if (!isVarSym(p)) reject('complex parameters');
+      restSym = p;
+    }
+  }
+  const scope0 = [];
+  let paramNames = [];
+  let restName = null;
+  let prologue = '';
+  let minArgs = 0, maxArgs = params.length;
+  if (simpleParams) {
+    paramNames = params.map((s) => { varSyms.add(s); const n = fresh(s); scope0.push([s, n]); return n; });
+    minArgs = params.length;
+    if (restSym) { varSyms.add(restSym); restName = fresh(restSym); scope0.push([restSym, restName]); }
+  }
+  const lit = (v) => {
+    if (typeof v === 'number') return Number.isFinite(v) ? (Object.is(v, -0) ? '-0' : String(v)) : k(v);
+    return k(v);
+  };
+
+  const scanDanger = (e) => {
+    if (e instanceof Sym) { if (DANGEROUS.has(e.name)) reject('closure or scope inside fallback form'); return; }
+    if (!(e instanceof Pair)) return;
+    if (e.a === QUOTE) return;
+    let p = e;
+    while (p instanceof Pair) {
+      const x = p.a;
+      if (x instanceof Sym) {
+        if (DANGEROUS.has(x.name)) reject('closure or scope inside fallback form');
+        if (p === e && x.gcell && isMacroVal(x.gcell.d) && !CORE_FORMS.has(x) && x !== BQUOTE && x !== COMMA && x !== COMMA_AT) reject('macro inside fallback form');
+      } else scanDanger(x);
+      p = p.d;
+    }
+  };
+
+  const varRef = (s, scope) => {
+    varSyms.add(s);
+    const local = lookupLocal(scope, s);
+    if (local !== null) return CELLS ? `(R.ee === $ee ? ${local}.d : R.lk($env, ${k(s)}))` : local;
+    if (isUvar(s)) return `R.uv(${CELLS ? '$env' : 'clo.d.d.a'}, ${k(s)})`;
+    if (s === SCOPE) { if (!CELLS) reject('creates a closure'); return '$env'; }
+    if (s === GLOBE) { if (!CELLS) reject('creates a closure'); return 'R.globe()'; }
+    if (s.lexb) {
+      let i = freeIndex.get(s);
+      if (i === undefined) { i = freeSyms.length; freeSyms.push(s); freeIndex.set(s, i); }
+      const c = tmp();
+      return `((${c} = ($fc || ($fc = R.cells(clo, FREE)))[${i}]) !== null ? ${c}.d : R.unb(${k(s)}))`;
+    }
+    globalSyms.add(s);
+    const c = tmp();
+    return `((${c} = ${k(s)}.gcell) !== null ? ${c}.d : R.unb(${k(s)}))`;
+  };
+
+  const varSet = (s, valExpr, scope) => {
+    varSyms.add(s);
+    const local = lookupLocal(scope, s);
+    if (local !== null) {
+      if (!CELLS) return `(${local} = ${valExpr})`;
+      const v = tmp();
+      return `(${v} = ${valExpr}, R.ee === $ee ? R.assign(${local}, ${v}) : R.setIn($env, ${k(s)}, ${v}))`;
+    }
+    if (isUvar(s)) reject('set on a free uvar');
+    if (s.lexb) {
+      let i = freeIndex.get(s);
+      if (i === undefined) { i = freeSyms.length; freeSyms.push(s); freeIndex.set(s, i); }
+      const c = tmp(), v = tmp();
+      return `(${v} = ${valExpr}, (${c} = ($fc || ($fc = R.cells(clo, FREE)))[${i}]) !== null && ${c}.a === ${k(s)} ? R.assign(${c}, ${v}) : R.setg(${k(s)}, ${v}))`;
+    }
+    globalSyms.add(s);
+    return `R.setg(${k(s)}, ${valExpr})`;
+  };
+
+  // A fallback form runs in ev on an alist built from the current locals.
+  const fallback = (e, scope) => {
+    if (CELLS) { for (const [s] of scope) varSyms.add(s); return `R.evEnv(${k(e)}, $env)`; }
+    scanDanger(e);
+    for (const [s] of scope) varSyms.add(s);
+    const m = tmp(), r = tmp();
+    const pairs = scope.map(([s, n]) => `${k(s)}, ${n}`).join(', ');
+    const back = scope.map(([, n], i) => `${n} = ${m}.c[${i}].d`).join(', ');
+    return `(${m} = R.mat(clo, [${pairs}]), ${r} = R.evm(${k(e)}, ${m})${back ? ', ' + back : ''}, ${r})`;
+  };
+
+  // Destructuring pattern: plain symbols and nested lists of them, with rest.
+  const patVars = (pat, out) => {
+    if (isVarSym(pat)) { out.push(pat); return; }
+    if (pat === NIL) return;
+    if (!(pat instanceof Pair)) reject('pattern');
+    if (pat.a === T || pat.a === O) reject('typed or optional pattern');
+    patVars(pat.a, out);
+    patVars(pat.d, out);
+  };
+  const patCheck = (pat, path, checks, assigns, names) => {
+    if (isVarSym(pat)) {
+      assigns.push(CELLS ? `${names.get(pat)} = new R.Pair(${k(pat)}, ${path}), $env = new R.Pair(${names.get(pat)}, $env)` : `${names.get(pat)} = ${path}`);
+      return;
+    }
+    if (pat === NIL) { checks.push(`${path} === R.NIL`); return; }
+    checks.push(`${path} instanceof R.Pair`);
+    patCheck(pat.a, `${path}.a`, checks, assigns, names);
+    patCheck(pat.d, `${path}.d`, checks, assigns, names);
+  };
+  const bindOne = (s, n, valExpr) => CELLS
+    ? `(${n} = new R.Pair(${k(s)}, ${valExpr}), $env = new R.Pair(${n}, $env))`
+    : `(${n} = ${valExpr})`;
+  // returns [expr that binds, newScope]
+  const bindPattern = (pat, valExpr, scope) => {
+    if (isVarSym(pat)) {
+      varSyms.add(pat);
+      const n = fresh(pat);
+      return [bindOne(pat, n, valExpr), scope.concat([[pat, n]])];
+    }
+    const vars = [];
+    patVars(pat, vars);
+    const names = new Map();
+    const newScope = scope.slice();
+    for (const s of vars) { varSyms.add(s); const n = fresh(s); names.set(s, n); newScope.push([s, n]); }
+    const p = tmp();
+    const checks = [], assigns = [];
+    patCheck(pat, p, checks, assigns, names);
+    if (CELLS) {
+      const slow = vars.map((s) => `${names.get(s)} = R.cellIn($env, ${k(s)})`).join(', ');
+      return [`(${p} = ${valExpr}, (${checks.join(' && ') || 'true'}) ? (${assigns.join(', ') || '0'}) : ($env = R.destr2(${k(pat)}, ${p}, $env)${slow ? ', ' + slow : ''}), 0)`, newScope];
+    }
+    const e2 = tmp();
+    const slow = vars.map((s) => `${names.get(s)} = R.eg(${e2}, ${k(s)})`).join(', ');
+    return [`(${p} = ${valExpr}, (${checks.join(' && ') || 'true'}) ? (${assigns.join(', ') || '0'}) : (${e2} = R.destr(${k(pat)}, ${p})${slow ? ', ' + slow : ''}), 0)`, newScope];
+  };
+
+  const bindParam = (pp, valExpr, scope) => {
+    if (pp instanceof Pair && pp.a === T) {
+      const v = pp.d.a, f = pp.d.d.a;
+      const t = tmp();
+      const [b, s2] = bindParam(v, t, scope);
+      return [`${t} = ${valExpr}, (R.call(${E(f, scope)}, [${t}]) === R.NIL ? R.mistype() : 0), ${b}`, s2];
+    }
+    if (pp instanceof Pair && pp.a === O) reject('optional inside pattern');
+    return bindPattern(pp, valExpr, scope);
+  };
+
+  // In cells mode an expression that binds variables restores the environment
+  // afterwards, so later closures don't capture bindings that are out of scope.
+  const scoped = (inner) => {
+    if (!CELLS) return `(${inner})`;
+    const sv = tmp(), r = tmp();
+    return `(${sv} = $env, ${r} = (${inner}), $env = ${sv}, ${r})`;
+  };
+
+  const seqExpr = (forms, scope) => {
+    const xs = listToArr(forms);
+    if (xs.length === 0) return 'R.NIL';
+    return '(' + xs.map((x) => E(x, scope)).join(', ') + ')';
+  };
+
+  const coreOk = (s) => {
+    if (!s.nat || s.lexb || s.dynb) return false;
+    coreSyms.add(s);
+    return true;
+  };
+
+  // inline jets: name -> [arity, (f, args) => expr]
+  const NUM2 = (op) => (f, a) => `(typeof ${a[0]} === 'number' && typeof ${a[1]} === 'number' ? ${a[0]} ${op} ${a[1]} : ${f}.x([${a[0]}, ${a[1]}]))`;
+  const CMP2 = (op) => (f, a) => `(typeof ${a[0]} === 'number' && typeof ${a[1]} === 'number' ? (${a[0]} ${op} ${a[1]} ? R.T : R.NIL) : ${f}.x([${a[0]}, ${a[1]}]))`;
+  const NUMN = (op) => (f, a) => `(${a.map((x) => `typeof ${x} === 'number'`).join(' && ')} ? ${op === '+' ? '0 + ' : ''}${a.join(` ${op} `)} : ${f}.x([${a.join(', ')}]))`;
+  const INLINE = {
+    '+': [[2, 3, 4], NUMN('+')], '*': [[2, 3, 4], NUMN('*')],
+    '-': [[1, 2, 3, 4], (f, a) => a.length === 1
+      ? `(typeof ${a[0]} === 'number' ? -${a[0]} : ${f}.x([${a[0]}]))`
+      : NUMN('-')(f, a)],
+    'nth': [2, (f, a) => `(typeof ${a[0]} === 'number' ? R.nth(${a[0]}, ${a[1]}) : ${f}.x([${a[0]}, ${a[1]}]))`],
+    '/': [2, (f, a) => `(typeof ${a[0]} === 'number' && typeof ${a[1]} === 'number' && ${a[1]} !== 0 ? ${a[0]} / ${a[1]} : ${f}.x([${a[0]}, ${a[1]}]))`],
+    '<': [2, CMP2('<')], '>': [2, CMP2('>')], '<=': [2, CMP2('<=')], '>=': [2, CMP2('>=')],
+    '=': [2, (f, a) => `(${a[0]} === ${a[1]} ? R.T : ${f}.x([${a[0]}, ${a[1]}]))`],
+    'id': [2, (f, a) => `(${a[0]} === ${a[1]} ? R.T : ${f}.x([${a[0]}, ${a[1]}]))`],
+    'no': [1, (f, a) => `(${a[0]} === R.NIL ? R.T : R.NIL)`],
+    'atom': [1, (f, a) => `(${a[0]} instanceof R.Pair ? R.NIL : R.T)`],
+    'pair': [1, (f, a) => `(${a[0]} instanceof R.Pair ? R.T : R.NIL)`],
+    'car': [1, (f, a) => `(${a[0]} instanceof R.Pair ? ${a[0]}.a : ${f}.x([${a[0]}]))`],
+    'cdr': [1, (f, a) => `(${a[0]} instanceof R.Pair ? ${a[0]}.d : ${f}.x([${a[0]}]))`],
+    'cadr': [1, (f, a) => `(${a[0]} instanceof R.Pair && ${a[0]}.d instanceof R.Pair ? ${a[0]}.d.a : ${f}.x([${a[0]}]))`],
+    'cddr': [1, (f, a) => `(${a[0]} instanceof R.Pair && ${a[0]}.d instanceof R.Pair ? ${a[0]}.d.d : ${f}.x([${a[0]}]))`],
+    'caddr': [1, (f, a) => `(${a[0]} instanceof R.Pair && ${a[0]}.d instanceof R.Pair && ${a[0]}.d.d instanceof R.Pair ? ${a[0]}.d.d.a : ${f}.x([${a[0]}]))`],
+    'cons': [2, (f, a) => `new R.Pair(${a[0]}, ${a[1]})`],
+    'join': [2, (f, a) => `new R.Pair(${a[0]}, ${a[1]})`],
+    'inc': [1, (f, a) => `(typeof ${a[0]} === 'number' ? ${a[0]} + 1 : ${f}.x([${a[0]}]))`],
+    'dec': [1, (f, a) => `(typeof ${a[0]} === 'number' ? ${a[0]} - 1 : ${f}.x([${a[0]}]))`],
+    'floor': [1, (f, a) => `(typeof ${a[0]} === 'number' ? Math.floor(${a[0]}) : ${f}.x([${a[0]}]))`],
+    'abs': [1, (f, a) => `(typeof ${a[0]} === 'number' ? Math.abs(${a[0]}) : ${f}.x([${a[0]}]))`],
+    'mod': [2, (f, a) => { const t = tmp(); return `(typeof ${a[0]} === 'number' && typeof ${a[1]} === 'number' && (${t} = R.mod(${a[0]}, ${a[1]})) !== null ? ${t} : ${f}.x([${a[0]}, ${a[1]}]))`; }],
+    'max': [2, (f, a) => `(typeof ${a[0]} === 'number' && typeof ${a[1]} === 'number' ? (${a[0]} < ${a[1]} ? ${a[1]} : ${a[0]}) : ${f}.x([${a[0]}, ${a[1]}]))`],
+    'min': [2, (f, a) => `(typeof ${a[0]} === 'number' && typeof ${a[1]} === 'number' ? (${a[1]} < ${a[0]} ? ${a[1]} : ${a[0]}) : ${f}.x([${a[0]}, ${a[1]}]))`],
+  };
+
+  // The value of an operator expression and whether it is a known global.
+  const opInfo = (op, scope) => {
+    if (op instanceof Sym && !op.lit && lookupLocal(scope, op) === null && !op.lexb) {
+      return { global: op };
+    }
+    return { global: null };
+  };
+
+  // expression context
+  const E = (e, scope) => {
+    if (e instanceof Sym) return e.lit ? k(e) : varRef(e, scope);
+    if (!(e instanceof Pair)) return lit(e);
+    const op = e.a;
+    if (op === VMARK && VMARK !== undefined) return varRef(e, scope);
+    if (op instanceof Char) return k(e);
+    if (op instanceof Sym && op.sf !== 0) {
+      const sf = op.sf;
+      if (sf === SF_QUOTE) return k(e.d.a);
+      if (sf === SF_LIT) return k(e);
+      if (sf === SF_IF) {
+        const parts = listToArr(e.d);
+        const go = (i) => {
+          if (i >= parts.length) return 'R.NIL';
+          if (i === parts.length - 1) return E(parts[i], scope);
+          return `(${E(parts[i], scope)} !== R.NIL ? ${E(parts[i + 1], scope)} : ${go(i + 2)})`;
+        };
+        return go(0);
+      }
+      if (sf === SF_THREAD) reject('thread');
+      if (FALLBACK_FORMS.has(op) && (sf < SF_FN || coreOk(op))) return fallback(e, scope);
+      if (sf >= SF_FN) {
+        if (!coreOk(op)) reject('core macro redefined or shadowed');
+        switch (sf) {
+          case SF_FN:
+            if (!CELLS) reject('creates a closure');
+            for (const [s2] of scope) varSyms.add(s2);
+            return `R.mkclo($env, ${k(e.d.a)}, ${k(fnBody(e))})`;
+          case SF_RFN:
+            if (!CELLS) reject('creates a closure');
+            for (const [s2] of scope) varSyms.add(s2);
+            return `R.mkrfn($env, ${k(e.d.a)}, ${k(e.d.d.a)}, ${k(fnBody(e.d))})`;
+          case SF_DEF: case SF_MAC:
+            if (!CELLS) reject('creates a closure');
+            return fallback(e, scope);
+          case SF_DO: return seqExpr(e.d, scope);
+          case SF_SET: {
+            const xs = listToArr(e.d);
+            const parts = [];
+            for (let i = 0; i < xs.length; i += 2) {
+              const p = xs[i];
+              const v = i + 1 < xs.length ? E(xs[i + 1], scope) : 'R.T';
+              if (isVarSym(p)) parts.push(varSet(p, v, scope));
+              else return fallback(e, scope);
+            }
+            return parts.length ? `(${parts.join(', ')})` : 'R.T';
+          }
+          case SF_LET: {
+            const [b, sc] = bindPattern(e.d.a, E(e.d.d.a, scope), scope);
+            return scoped(`${b}, ${seqExpr(e.d.d.d, sc)}`);
+          }
+          case SF_WITH: case SF_WITHS: {
+            const xs = listToArr(e.d.a);
+            let sc = scope;
+            const parts = [];
+            if (sf === SF_WITH) {
+              const ts = [];
+              for (let i = 0; i < xs.length; i += 2) { const t = tmp(); ts.push(t); parts.push(`${t} = ${E(xs[i + 1] === undefined ? NIL : xs[i + 1], scope)}`); }
+              for (let i = 0; i < xs.length; i += 2) { const [b, s2] = bindPattern(xs[i], ts[i / 2], sc); parts.push(b); sc = s2; }
+            } else {
+              for (let i = 0; i < xs.length; i += 2) { const [b, s2] = bindPattern(xs[i], E(xs[i + 1] === undefined ? NIL : xs[i + 1], sc), sc); parts.push(b); sc = s2; }
+            }
+            parts.push(seqExpr(e.d.d, sc));
+            return scoped(parts.join(', '));
+          }
+          case SF_WHEN: case SF_UNLESS:
+            return `(${E(e.d.a, scope)} ${sf === SF_WHEN ? '!==' : '==='} R.NIL ? ${seqExpr(e.d.d, scope)} : R.NIL)`;
+          case SF_AND: {
+            const xs = listToArr(e.d);
+            if (xs.length === 0) return 'R.T';
+            let out = E(xs[xs.length - 1], scope);
+            for (let i = xs.length - 2; i >= 0; i--) out = `(${E(xs[i], scope)} === R.NIL ? R.NIL : ${out})`;
+            return out;
+          }
+          case SF_OR: {
+            const xs = listToArr(e.d);
+            if (xs.length === 0) return 'R.NIL';
+            let out = E(xs[xs.length - 1], scope);
+            for (let i = xs.length - 2; i >= 0; i--) { const t = tmp(); out = `((${t} = ${E(xs[i], scope)}) !== R.NIL ? ${t} : ${out})`; }
+            return out;
+          }
+          case SF_CASE: {
+            const t = tmp();
+            const rest = listToArr(e.d.d);
+            const go = (i) => {
+              if (i >= rest.length) return 'R.NIL';
+              if (i === rest.length - 1) return E(rest[i], scope);
+              const key = rest[i];
+              const test = (key instanceof Sym || typeof key === 'number' || key instanceof Char) ? `${t} === ${lit(key)}` : `R.equal(${t}, ${k(key)})`;
+              return `(${test} ? ${E(rest[i + 1], scope)} : ${go(i + 2)})`;
+            };
+            return `(${t} = ${E(e.d.a, scope)}, ${go(0)})`;
+          }
+          case SF_FOR: case SF_WHILE: case SF_REPEAT:
+            return `(() => { ${loopStmt(e, scope)} return R.NIL; })()`;
+        }
+        reject('unsupported core form');
+      }
+    }
+    // direct lambda ((fn parms . body) args...)
+    if (op instanceof Pair && op.a === FN && FN.nat && !FN.lexb && !FN.dynb) {
+      coreSyms.add(FN);
+      const ps = op.d.a;
+      const args = listToArr(e.d);
+      const vals = args.map((x) => { const t = tmp(); return [t, E(x, scope)]; });
+      let sc = scope;
+      const parts = vals.map(([t, v]) => `${t} = ${v}`);
+      let p = ps, i = 0;
+      while (p instanceof Pair) {
+        if (!isVarSym(p.a) || i >= vals.length) reject('direct lambda parameters');
+        const [b, s2] = bindPattern(p.a, vals[i++][0], sc); parts.push(b); sc = s2;
+        p = p.d;
+      }
+      if (p === NIL) { if (i !== vals.length) reject('direct lambda arity'); }
+      else if (isVarSym(p)) { const [b, s2] = bindPattern(p, `R.rest([${vals.slice(i).map((v) => v[0]).join(', ')}], 0)`, sc); parts.push(b); sc = s2; }
+      else reject('direct lambda parameters');
+      parts.push(seqExpr(fnBodyList(op), sc));
+      return scoped(parts.join(', '));
+    }
+    return callExpr(e, scope, false);
+  };
+
+  const fnBodyList = (fe) => fe.d.d;
+
+  // macro call at compile time?
+  const macroOf = (op, scope) => {
+    if (!(op instanceof Sym) || op.lit || lookupLocal(scope, op) !== null || op.lexb || op.dynb) return null;
+    const c = op.gcell;
+    if (c === null || !isMacroVal(c.d)) return null;
+    return c.d;
+  };
+
+  // generic call; returns an expression (value) or, with tail=true, statements
+  const callExpr = (e, scope, tail) => {
+    const op = e.a;
+    const m = macroOf(op, scope);
+    if (m !== null) {
+      macroGuards.set(op, m);
+      const exp = expandCached(e, m);
+      markCode(exp);
+      return tail ? T(exp, scope) : E(exp, scope);
+    }
+    const args = listToArr(e.d);
+    const info = opInfo(op, scope);
+    const f = tmp();
+    const opExpr = E(op, scope);
+    if (info.global) funSyms.add(info.global);
+    const ats = args.map(() => tmp());
+    const evalArgs = args.map((x, i) => `${ats[i]} = ${E(x, scope)}`);
+    // inline jet (the identity guard decides at run time, so a free name that is
+    // also bound lexically elsewhere can inline too)
+    const inl = info.global || (op instanceof Sym && !op.lit && lookupLocal(scope, op) === null && !isUvar(op) ? op : null);
+    if (inl) {
+      const g = inl;
+      const jetName = g.name;
+      const spec = INLINE[jetName];
+      const cur = g.gcell ? g.gcell.d : null;
+      if (spec && cur instanceof Pair && typeof cur.x === 'function') {
+        const arities = Array.isArray(spec[0]) ? spec[0] : [spec[0]];
+        if (arities.includes(args.length)) {
+          const fast = spec[1](f, ats);
+          const generic = `R.call(${f}, [${ats.join(', ')}])`;
+          const expr = `(${f} = ${opExpr}${evalArgs.length ? ', ' + evalArgs.join(', ') : ''}, ${f} === ${k(cur)} ? ${fast} : ${generic})`;
+          return tail ? `return $fin(${expr});` : expr;
+        }
+      }
+    }
+    const macCheck = info.global ? '' : `R.isMac(${f}) ? ${fallback(e, scope)} : `;
+    if (!tail) {
+      return `(${f} = ${opExpr}, ${macCheck}(${evalArgs.length ? evalArgs.join(', ') + ', ' : ''}R.call(${f}, [${ats.join(', ')}])))`;
+    }
+    // tail call: self call becomes a loop
+    const selfLoop = selfAssign(ats);
+    const lines = [];
+    lines.push(`${f} = ${opExpr};`);
+    if (!info.global) lines.push(`if (R.isMac(${f})) return $fin(${fallback(e, scope)});`);
+    for (const x of evalArgs) lines.push(`${x};`);
+    if (selfLoop !== null) lines.push(`if (${f} === clo) { ${selfLoop} continue; }`);
+    lines.push(`if ($last === null) return R.tail(${f}, [${ats.join(', ')}]);`);
+    lines.push(`return $fin(R.call(${f}, [${ats.join(', ')}]));`);
+    return lines.join(' ');
+  };
+
+  // assignment of new argument values to the parameters, or null if the arity can't match
+  const selfAssign = (ats) => {
+    if (!simpleParams) return null;
+    if (restName === null && ats.length !== paramNames.length) return null;
+    if (restName !== null && ats.length < paramNames.length) return null;
+    if (CELLS) {
+      const parts = ['$env = clo.d.d.a; $ee = R.ee;'];
+      paramNames.forEach((n, i) => parts.push(`${n} = new R.Pair(${k(params[i])}, ${ats[i]}); $env = new R.Pair(${n}, $env);`));
+      if (restName !== null) parts.push(`${restName} = new R.Pair(${k(restSym)}, R.rest([${ats.slice(paramNames.length).join(', ')}], 0)); $env = new R.Pair(${restName}, $env);`);
+      return parts.join(' ');
+    }
+    const parts = paramNames.map((n, i) => `${n} = ${ats[i]};`);
+    if (restName !== null) parts.push(`${restName} = R.rest([${ats.slice(paramNames.length).join(', ')}], 0);`);
+    return parts.join(' ');
+  };
+
+  const loopStmt = (e, scope) => {
+    const sf = e.a.sf;
+    if (sf === SF_WHILE) {
+      return `while (${E(e.d.a, scope)} !== R.NIL) { ${listToArr(e.d.d).map((x) => E(x, scope) + ';').join(' ')} }`;
+    }
+    if (sf === SF_REPEAT) {
+      const n = tmp(), i = tmp();
+      return `${n} = ${E(e.d.a, scope)}; for (${i} = 1; !R.less(${n}, ${i}); ${i}++) { ${listToArr(e.d.d).map((x) => E(x, scope) + ';').join(' ')} }`;
+    }
+    const v = e.d.a;
+    if (!isVarSym(v)) reject('for variable');
+    const i = tmp(), mx = tmp();
+    varSyms.add(v);
+    const n = fresh(v);
+    const sc = scope.concat([[v, n]]);
+    if (CELLS) {
+      const outer = tmp();
+      return `${i} = ${E(e.d.d.a, scope)}; ${mx} = ${E(e.d.d.d.a, scope)}; ${outer} = $env; while (typeof ${mx} === 'number' && typeof ${i} === 'number' ? ${i} <= ${mx} : !R.less(${mx}, ${i})) { ${n} = new R.Pair(${k(v)}, ${i}); $env = new R.Pair(${n}, ${outer}); ${listToArr(e.d.d.d.d).map((x) => E(x, sc) + ';').join(' ')} ${i} = R.num(R.ee === $ee ? ${n}.d : R.lk($env, ${k(v)})) + 1; } $env = ${outer};`;
+    }
+    return `${i} = ${E(e.d.d.a, scope)}; ${mx} = ${E(e.d.d.d.a, scope)}; while (typeof ${mx} === 'number' && typeof ${i} === 'number' ? ${i} <= ${mx} : !R.less(${mx}, ${i})) { ${n} = ${i}; ${listToArr(e.d.d.d.d).map((x) => E(x, sc) + ';').join(' ')} ${i} = R.num(${n}) + 1; }`;
+  };
+
+  // tail context: statements that return (or continue the self loop)
+  const T = (e, scope) => {
+    if (!(e instanceof Pair) || e.a instanceof Char) return `return $fin(${E(e, scope)});`;
+    const op = e.a;
+    if (op instanceof Sym && op.sf !== 0) {
+      const sf = op.sf;
+      if (sf === SF_IF) {
+        const parts = listToArr(e.d);
+        const go = (i) => {
+          if (i >= parts.length) return 'return $fin(R.NIL);';
+          if (i === parts.length - 1) return T(parts[i], scope);
+          return `if (${E(parts[i], scope)} !== R.NIL) { ${T(parts[i + 1], scope)} } else { ${go(i + 2)} }`;
+        };
+        return go(0);
+      }
+      if (sf >= SF_FN && !FALLBACK_FORMS.has(op) && coreOk(op)) {
+        const seqT = (forms, sc) => {
+          const xs = listToArr(forms);
+          if (xs.length === 0) return 'return $fin(R.NIL);';
+          return xs.slice(0, -1).map((x) => E(x, sc) + ';').join(' ') + ' ' + T(xs[xs.length - 1], sc);
+        };
+        switch (sf) {
+          case SF_DO: return seqT(e.d, scope);
+          case SF_LET: {
+            const [b, sc] = bindPattern(e.d.a, E(e.d.d.a, scope), scope);
+            return `${b}; ${seqT(e.d.d.d, sc)}`;
+          }
+          case SF_WITH: case SF_WITHS: {
+            const xs = listToArr(e.d.a);
+            let sc = scope;
+            const parts = [];
+            if (sf === SF_WITH) {
+              const ts = [];
+              for (let i = 0; i < xs.length; i += 2) { const t = tmp(); ts.push(t); parts.push(`${t} = ${E(xs[i + 1] === undefined ? NIL : xs[i + 1], scope)};`); }
+              for (let i = 0; i < xs.length; i += 2) { const [b, s2] = bindPattern(xs[i], ts[i / 2], sc); parts.push(b + ';'); sc = s2; }
+            } else {
+              for (let i = 0; i < xs.length; i += 2) { const [b, s2] = bindPattern(xs[i], E(xs[i + 1] === undefined ? NIL : xs[i + 1], sc), sc); parts.push(b + ';'); sc = s2; }
+            }
+            return parts.join(' ') + ' ' + seqT(e.d.d, sc);
+          }
+          case SF_WHEN: case SF_UNLESS:
+            return `if (${E(e.d.a, scope)} ${sf === SF_WHEN ? '!==' : '==='} R.NIL) { ${seqT(e.d.d, scope)} } else { return $fin(R.NIL); }`;
+          case SF_AND: {
+            const xs = listToArr(e.d);
+            if (xs.length === 0) return 'return $fin(R.T);';
+            return xs.slice(0, -1).map((x) => `if (${E(x, scope)} === R.NIL) return $fin(R.NIL);`).join(' ') + ' ' + T(xs[xs.length - 1], scope);
+          }
+          case SF_OR: {
+            const xs = listToArr(e.d);
+            if (xs.length === 0) return 'return $fin(R.NIL);';
+            return xs.slice(0, -1).map((x) => { const t = tmp(); return `if ((${t} = ${E(x, scope)}) !== R.NIL) return $fin(${t});`; }).join(' ') + ' ' + T(xs[xs.length - 1], scope);
+          }
+          case SF_FOR: case SF_WHILE: case SF_REPEAT:
+            return `${loopStmt(e, scope)} return $fin(R.NIL);`;
+          case SF_CASE: {
+            const t = tmp();
+            const rest = listToArr(e.d.d);
+            const go = (i) => {
+              if (i >= rest.length) return 'return $fin(R.NIL);';
+              if (i === rest.length - 1) return T(rest[i], scope);
+              const key = rest[i];
+              const test = (key instanceof Sym || typeof key === 'number' || key instanceof Char) ? `${t} === ${lit(key)}` : `R.equal(${t}, ${k(key)})`;
+              return `if (${test}) { ${T(rest[i + 1], scope)} } else { ${go(i + 2)} }`;
+            };
+            return `${t} = ${E(e.d.a, scope)}; ${go(0)}`;
+          }
+        }
+      }
+      return `return $fin(${E(e, scope)});`;
+    }
+    if (op === VMARK && VMARK !== undefined) return `return $fin(${E(e, scope)});`;
+    if (op instanceof Pair && op.a === FN && FN.nat && !FN.lexb && !FN.dynb) {
+      // direct lambda in tail position: bind, then the body is in tail position
+      coreSyms.add(FN);
+      const args = listToArr(e.d);
+      const vals = args.map((x) => { const t = tmp(); return [t, E(x, scope)]; });
+      let sc = scope;
+      const parts = vals.map(([t, v]) => `${t} = ${v};`);
+      let pp = op.d.a, i = 0;
+      while (pp instanceof Pair) {
+        if (!isVarSym(pp.a) || i >= vals.length) reject('direct lambda parameters');
+        const [b, s2] = bindPattern(pp.a, vals[i++][0], sc); parts.push(b + ';'); sc = s2;
+        pp = pp.d;
+      }
+      if (pp === NIL) { if (i !== vals.length) reject('direct lambda arity'); }
+      else if (isVarSym(pp)) { const [b, s2] = bindPattern(pp, `R.rest([${vals.slice(i).map((v) => v[0]).join(', ')}], 0)`, sc); parts.push(b + ';'); sc = s2; }
+      else reject('direct lambda parameters');
+      const xs = listToArr(fnBodyList(op));
+      if (xs.length === 0) return parts.join(' ') + ' return $fin(R.NIL);';
+      return parts.join(' ') + ' ' + xs.slice(0, -1).map((x) => E(x, sc) + ';').join(' ') + ' ' + T(xs[xs.length - 1], sc);
+    }
+    if (op instanceof Pair) return `return $fin(${E(e, scope)});`;
+    // (cons a (self ...)) in tail position: build the list in place
+    if (op instanceof Sym && op === sym('cons') && !op.lexb && !op.dynb && lookupLocal(scope, op) === null && macroOf(op, scope) === null) {
+      const args = listToArr(e.d);
+      const inner = args[1];
+      if (args.length === 2 && inner instanceof Pair && inner.a instanceof Sym && !inner.a.lit && inner.a.sf === 0 && macroOf(inner.a, scope) === null) {
+        const cur = op.gcell ? op.gcell.d : null;
+        if (cur instanceof Pair && typeof cur.x === 'function') {
+          funSyms.add(op);
+          const f = tmp(), a0 = tmp(), g = tmp();
+          const innerArgs = listToArr(inner.d);
+          const ats = innerArgs.map(() => tmp());
+          const selfLoop = selfAssign(ats);
+          if (selfLoop !== null) {
+            const innerInfo = opInfo(inner.a, scope);
+            if (innerInfo.global) funSyms.add(innerInfo.global);
+            const lines = [];
+            lines.push(`${f} = ${E(op, scope)};`);
+            lines.push(`${a0} = ${E(args[0], scope)};`);
+            lines.push(`${g} = ${E(inner.a, scope)};`);
+            if (!innerInfo.global) lines.push(`if (R.isMac(${g})) return $fin(R.call(${f}, [${a0}, ${fallback(inner, scope)}]));`);
+            innerArgs.forEach((x, i) => lines.push(`${ats[i]} = ${E(x, scope)};`));
+            lines.push(`if (${f} === ${k(cur)} && ${g} === clo) { const $c = new R.Pair(${a0}, R.NIL); if ($last === null) $head = $c; else $last.d = $c; $last = $c; ${selfLoop} continue; }`);
+            lines.push(`return $fin(R.call(${f}, [${a0}, R.call(${g}, [${ats.join(', ')}])]));`);
+            return lines.join(' ');
+          }
+        }
+      }
+    }
+    return callExpr(e, scope, true);
+  };
+
+  if (!simpleParams) {
+    // bind each parameter in order; defaults and type checks see earlier ones
+    let sc = scope0.slice();
+    const lines = [];
+    params.forEach((pp, i) => {
+      if (pp instanceof Pair && pp.a === O) {
+        const v = pp.d instanceof Pair ? pp.d.a : NIL;
+        const dexp = pp.d instanceof Pair && pp.d.d instanceof Pair ? pp.d.d.a : NIL;
+        const t = tmp();
+        lines.push(`${t} = args.length > ${i} ? args[${i}] : ${E(dexp, sc)};`);
+        const [b, s2] = bindParam(v, t, sc);
+        lines.push(b + ';');
+        sc = s2;
+      } else {
+        minArgs = i + 1;
+        if (pp instanceof Pair && pp.a !== T && !isUvar(pp)) {
+          // destructured parameter: check the shape first; on mismatch let the closure tier raise the error
+          const vars = [];
+          patVars(pp, vars);
+          const names = new Map();
+          for (const v of vars) { varSyms.add(v); const n = fresh(v); names.set(v, n); sc = sc.concat([[v, n]]); }
+          const checks = [], assigns = [];
+          patCheck(pp, `args[${i}]`, checks, assigns, names);
+          lines.push(`if (!(${checks.join(' && ') || 'true'})) return R.slow(clo, args); ${assigns.map((a) => a + ';').join(' ')}`);
+        } else {
+          const [b, s2] = bindParam(pp, `args[${i}]`, sc);
+          lines.push(b + ';');
+          sc = s2;
+        }
+      }
+    });
+    if (restSym) {
+      varSyms.add(restSym);
+      restName = fresh(restSym);
+      lines.push(bindOne(restSym, restName, `R.rest(args, ${params.length})`) + ';');
+      sc = sc.concat([[restSym, restName]]);
+    }
+    prologue = lines.join(' ');
+    scope0.length = 0;
+    scope0.push(...sc);
+  }
+  const tailCode = T(body, scope0);
+  const freeK = k(freeSyms);
+  const src = `"use strict";
+const FREE = ${freeK};
+return function belCompiled(clo, args) {
+  ${simpleParams
+    ? `if (args.length ${restName !== null ? '<' : '!=='} ${paramNames.length}) return R.slow(clo, args);`
+    : `if (args.length < ${minArgs}${restSym ? '' : ` || args.length > ${maxArgs}`}) return R.slow(clo, args);`}
+  let ${(simpleParams && !CELLS ? paramNames.map((n, i) => `${n} = args[${i}]`).concat(restName !== null ? [`${restName} = R.rest(args, ${paramNames.length})`] : []) : []).concat(['$fc = null', '$head = null', '$last = null', '$env = clo.d.d.a', '$ee = R.ee']).join(', ')};
+  ${hoisted.filter((n) => !(simpleParams && !CELLS && (paramNames.includes(n) || n === restName))).length ? 'let ' + hoisted.filter((n) => !(simpleParams && !CELLS && (paramNames.includes(n) || n === restName))).join(', ') + ';' : ''}
+  const $fin = (x) => ($last === null ? x : ($last.d = x, $head));
+  ${simpleParams && CELLS ? paramNames.map((n, i) => `${n} = new R.Pair(${k(params[i])}, args[${i}]); $env = new R.Pair(${n}, $env);`).join(' ') + (restName !== null ? ` ${restName} = new R.Pair(${k(restSym)}, R.rest(args, ${paramNames.length})); $env = new R.Pair(${restName}, $env);` : '') : ''}
+  ${prologue}
+  for (;;) {
+    ${tailCode}
+  }
+};`;
+  // assumptions checked whenever JIT_GEN moves
+  const dynb = (s) => s instanceof Sym ? s.dynb : DYN_UVARS.has(s);
+  for (const s of varSyms) if (dynb(s)) reject('dynamically bound variable');
+  for (const s of globalSyms) if (s.lexb) reject('lexically bound global');
+  const vs = [...varSyms], gs = [...globalSyms], ms = [...macroGuards], cs = [...coreSyms], fs = [...funSyms];
+  const check = () => {
+    for (const s of vs) if (dynb(s)) return false;
+    for (const s of gs) if (s.lexb) return false;
+    for (const [s, m] of ms) if (s.lexb || s.dynb || s.gcell === null || s.gcell.d !== m) return false;
+    for (const s of cs) if (!s.nat || s.lexb || s.dynb) return false;
+    for (const s of fs) if (s.lexb || s.dynb || (s.gcell !== null && isMacroVal(s.gcell.d))) return false;
+    return true;
+  };
+  let factory;
+  try {
+    factory = new Function('K', 'R', src);
+  } catch (ex) {
+    if (ex instanceof SyntaxError) throw new Error('jit produced invalid JavaScript: ' + ex.message + '\n' + src);
+    reject('new Function refused');
+  }
+  const code = factory(K, R);
+  return { code, check, src };
 }
 
 // ---------------------------------------------------------------- reader
@@ -1723,8 +2686,10 @@ function equal(x, y) {
 }
 
 function num(x) {
-  if (typeof x !== 'number') sigerr(sym('mistype'));
-  return x;
+  if (typeof x === 'number') return x;
+  const v = sigerr(sym('mistype'));
+  if (typeof v === 'number') return v;
+  throw new BelError(sym('mistype'), 'Bel error: mistype (an err handler returned a non-number to arithmetic)');
 }
 
 function less(x, y) {
@@ -1794,11 +2759,13 @@ const prims = {
   },
   xar: (a) => {
     if (!(a[0] instanceof Pair)) return sigerr(sym('xar-on-atom'));
+    noteMutation(a[0]);
     a[0].a = a[1];
     return a[1];
   },
   xdr: (a) => {
     if (!(a[0] instanceof Pair)) return sigerr(sym('xdr-on-atom'));
+    noteMutation(a[0]);
     if (a[0].k) epoch++;
     a[0].d = a[1];
     return a[1];
@@ -2334,13 +3301,17 @@ let booted = false;
  * @param {() => number} [opts.stdin]  next byte of the default input stream (ins = nil), or -1 at end
  * @param {string} [opts.belSource]  text of bel.bel; defaults to readFile('interp/bel.bel')
  * @param {(command: string) => boolean} [opts.sys]  implementation of the sys primitive
- * @param {boolean} [opts.compile]  false runs everything on the closure tier (same as BEL_NOCOMPILE=1)
+ * @param {boolean} [opts.compile]  false runs everything on the tree-walking evaluator (same as BEL_NOCOMPILE=1)
+ * @param {'ev'|'closure'|'js'} [opts.tier]  highest execution tier to use (also BEL_TIER); default 'js'
  */
 export class Bel {
   constructor(opts = {}) {
     if (booted) throw new Error('only one Bel instance per JS realm');
     booted = true;
-    if (opts.compile === false) COMPILE = false;
+    if (opts.compile === false || opts.tier === 'ev') COMPILE = false;
+    if (opts.tier === 'closure') JSTIER = false;
+    if (!COMPILE) JSTIER = false;
+    this.tier = !COMPILE ? 'ev' : JSTIER ? 'js' : 'closure';
     host = {
       readFile: opts.readFile || (() => null),
       writeFile: opts.writeFile || null,
@@ -2352,6 +3323,9 @@ export class Bel {
     if (opts.stdin) stdinStream.reader = opts.stdin;
     this.nil = NIL;
     this.t = T;
+    R.NIL = NIL;
+    R.T = T;
+    R.equal = (a, b) => equal(a, b);
     for (const [name, fn] of Object.entries(prims)) setGlobal(sym(name), mkprim(name, fn));
     setGlobal(INS, NIL);
     setGlobal(OUTS, NIL);
@@ -2438,6 +3412,8 @@ export class Bel {
   toArray(l) { return listToArr(l); }
   /** The interned symbol called name. */
   sym(name) { return sym(name); }
+  /** Counters for the JavaScript tier: functions compiled, rejected (with reasons), invalidated. */
+  jitStats() { return { compiled: jitStats.compiled, rejected: jitStats.rejected, invalidated: jitStats.invalidated, reasons: Object.fromEntries(jitStats.reasons) }; }
   /** The global value of name, or undefined if it is unbound. */
   global(name) {
     const c = sym(name).gcell;

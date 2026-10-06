@@ -1,12 +1,12 @@
 # The Bel interpreter
 
-`interp/bel.js` is an interpreter for [Bel](https://paulgraham.com/bel.html), the Lisp Paul Graham defined in itself in 2019. It is one ES module of about 2,400 lines with no dependencies, and it runs in Node and in browsers (including Web Workers).
+`interp/bel.js` is an interpreter for [Bel](https://paulgraham.com/bel.html), the Lisp Paul Graham defined in itself in 2019. It is one ES module of about 3,400 lines with no dependencies, and it runs in Node and in browsers (including Web Workers).
 
 Its job is to run PG's spec, `interp/bel.bel`, exactly as written, and then run real programs on it fast enough to draw Doom. It does this in three layers:
 
 1. **A direct implementation of Bel's axioms**: the primitives, the special forms, closures and macros as real Bel lists, and the environment as a real alist.
 2. **The unmodified `bel.bel`**, loaded at startup (about 45 ms), so every definition in the spec exists as PG wrote it.
-3. **Speed** that keeps the same behavior: native replacements ("jets") for hot `bel.bel` functions, core macros evaluated natively, memoized macro expansion, a closure compiler with proper tail calls, and a CDR-coding cache for list indexing.
+3. **Speed** that keeps the same behavior: native replacements ("jets") for hot `bel.bel` functions, core macros evaluated natively, memoized macro expansion, two compilers (Bel to JavaScript closures, and Bel to JavaScript source for hot functions) with proper tail calls, and a CDR-coding cache for list indexing.
 
 This document describes all three, the host API, and every place where the implementation deliberately differs from the spec.
 
@@ -17,7 +17,7 @@ This document describes all three, the host API, and every place where the imple
 - [Evaluation](#evaluation)
 - [Locations: `where` and `set`](#locations-where-and-set)
 - [Errors, `dyn`, `after` and `ccc`](#errors-dyn-after-and-ccc)
-- [The compiler](#the-compiler)
+- [The compilers](#the-compilers)
 - [Jets](#jets)
 - [The CDR-coding cache](#the-cdr-coding-cache)
 - [Reader and printer](#reader-and-printer)
@@ -65,7 +65,7 @@ const bel = new Bel({
   stdin: () => byte,                       // optional: next input byte, or -1 at end of input
   belSource: '...',                        // optional: text of bel.bel; otherwise readFile('interp/bel.bel')
   sys: (command) => boolean,               // optional: implementation of the sys primitive
-  compile: false,                          // optional: run everything on the closure tier
+  tier: 'js',                              // optional: highest execution tier, 'ev', 'closure' or 'js' (the default)
 });
 ```
 
@@ -82,13 +82,15 @@ const bel = new Bel({
 | `bel.list(...xs)`, `bel.toArray(l)` | Builds a Bel list; converts a proper list to an array |
 | `bel.sym(name)` | The interned symbol `name` |
 | `bel.setJets(enabled, keep)` | Switches jets off (back to `bel.bel`'s own definitions) or on again, except the names in `keep`; returns the names switched. `test/jets-off.mjs` uses it to show a frame rendered with PG's definitions is identical |
+| `bel.tier` | The highest execution tier in use: `'ev'`, `'closure'` or `'js'` |
+| `bel.jitStats()` | Counts of functions compiled to JavaScript, rejected and invalidated, with the rejection reasons |
 | `bel.nil`, `bel.t` | The symbols `nil` and `t` |
 
 Errors that no Bel handler catches surface as a thrown `BelError`. Its `.value` is the Bel error value (usually a symbol such as `mistype` or a list such as `(unboundb foo)`), and its message is the printed form, with the parameter list added for arity and destructuring errors. Output written before an error stays in the buffer, so call `flush()` or `takeOutput()` in your error handler.
 
 Symbols and characters are interned per JavaScript realm, so there can be one `Bel` per realm (one per Node process, worker or page). Constructing a second throws.
 
-The `compile: false` option, or the environment variable `BEL_NOCOMPILE=1` in Node, turns off the [compiler](#the-compiler) and runs everything through the tree-walking evaluator, which is useful for checking that the two agree.
+The `tier` option, or the environment variable `BEL_TIER` in Node, caps the [execution tier](#the-compilers): `ev` runs everything through the tree-walking evaluator, `closure` adds the closure compiler, and `js` (the default) also compiles hot functions to JavaScript source. All three give the same answers, and the test suites check that they do. `compile: false` and `BEL_NOCOMPILE=1` are older spellings of `tier: 'ev'`.
 
 ## How Bel values look in JavaScript
 
@@ -171,7 +173,7 @@ An operator is evaluated first, then the arguments left to right, then the funct
 
 ### Macro expansion is memoized
 
-Bel macros are first-class and, in the spec, expanded every time a call is evaluated. This interpreter caches each expansion on the call-site pair, keyed by the macro value, and reuses it while the operator still evaluates to the same macro. This assumes a macro's expansion depends only on its arguments, which is true of every macro in `bel.bel` (macros that call `uvar` get the same fresh variables each time, which is harmless because the binding forms that use them are separate). A macro whose expansion has side effects or depends on changing global state would see its expansion computed once per call site.
+Bel macros are first-class and, in the spec, expanded every time a call is evaluated. This interpreter caches each expansion on the call-site pair, keyed by the macro value, and reuses it while the operator still evaluates to the same macro and the code has not been changed in place: every pair of a call site whose expansion is cached is marked as code, and an `xar` or `xdr` on a marked pair throws away every cached expansion and compiled node, so a program that edits its own code sees the edit, as in the spec. This assumes a macro's expansion depends only on its arguments, which is true of every macro in `bel.bel` (macros that call `uvar` get the same fresh variables each time, which is harmless because the binding forms that use them are separate). A macro whose expansion has side effects or depends on changing global state would see its expansion computed once per call site.
 
 ## Locations: `where` and `set`
 
@@ -197,7 +199,15 @@ When a primitive, a jet or the evaluator detects an error, it calls `sigerr` wit
 - `after` is a JavaScript `try`/`finally`.
 - `ccc` creates a continuation backed by a unique token. Calling the continuation throws; the `ccc` that created it catches its own token and returns the value. A continuation works while its `ccc` is still active, which covers `catch`/`throw`, `eif`, early exits and error handling. Calling it after its `ccc` has returned is not supported.
 
-## The compiler
+## The compilers
+
+There are three execution tiers, and code moves up through them on its own:
+
+1. **`ev`**, the tree-walking evaluator, implements every rule directly. Everything unusual ends up here.
+2. **The closure tier** compiles code into JavaScript closures the first time it runs.
+3. **The JS tier** compiles a closure that has been called 16 times into JavaScript source, which the JavaScript engine's own optimizing compiler then turns into machine code.
+
+### The closure tier
 
 Code is compiled the first time it is evaluated. Each code pair becomes a JavaScript function `node(a, t)`, where `a` is the Bel environment (still a real alist) and `t` says the node is in tail position. The compiled node is cached on the pair.
 
@@ -206,7 +216,19 @@ Code is compiled the first time it is evaluated. Each code pair becomes a JavaSc
 - A closure call in tail position does not grow the JavaScript stack. The node stores the next environment and body in a shared marker and returns it, and the caller's loop (a trampoline) runs it. So Bel loops written as tail recursion run in constant stack, as the spec's interpreter does.
 - Location mode, `where`, `dyn`, `after`, `ccc`, `def`, `mac`, `til` and `loop` are delegated to the tree-walking evaluator, `ev`, which implements the same semantics directly. Closures applied from `ev` switch back to compiled code.
 
-The compiler and `ev` agree by construction, and this is also checked: running the Doom engine through both produces byte-identical output over a 120-frame golden run, and the test suites pass in both modes.
+### The JS tier
+
+A closure body that has run 16 times is translated into the source of one JavaScript function, `belCompiled(clo, args)`, and built with `new Function`. The generated code is cached per body, so every closure made from the same `fn` shares it.
+
+- **Variables.** In a body that creates no closures and never mentions `scope`, parameters and `let` variables are plain JavaScript locals. A body that does create closures, or reads `scope`, is compiled in *cells mode*: each variable is a real `(name . value)` pair consed onto a real alist, exactly as `ev` would build it, so a closure created inside captures the same environment structure, and `(cadr (car (cddr f)))`-style reflection sees what it would see in the spec. Free variables are read through the closure's own environment cells (looked up once per closure and cached until any `xar` or `xdr`), and globals through their global cells.
+- **Parameters.** Plain, rest, optional `(o x default)`, typed `(t x type)` and destructured parameters are bound in a prologue. If an argument list doesn't fit a destructuring pattern, the call is handed to the closure tier, so the error and its message are the ones `ev` gives.
+- **Macros** are expanded at compile time, using the same memoized expansion as the other tiers, behind a guard that the macro is still the same value. Forms that need a real environment (`where`, `set` on a place, `dyn`, `after`, `ccc`, backquote, `til`, `loop`) run in `ev` on an alist built from the current locals, and the values are copied back afterwards.
+- **Primitives.** Calls to the arithmetic, comparison, `car`/`cdr` family, `cons`, `nth` and similar jets are inlined as JavaScript operations behind a check that the operator is still that very jet and the arguments are numbers or pairs. Any other case calls the jet normally, so redefining `+` or `car` works mid-run.
+- **Calls.** Self tail calls become loops. Other tail calls go through the same trampoline as the closure tier, so mutual recursion runs in constant stack. `(cons x (self ...))` in tail position becomes a loop that builds the list front to back (tail recursion modulo cons), so `bel.bel`'s own `map` runs in constant stack.
+- **Assumptions.** Compiled code assumes things such as "`floor` has never been bound dynamically" or "`let` is still `bel.bel`'s macro". Any event that could break one (a symbol bound dynamically or lexically for the first time, a macro or core macro redefined, a code pair changed in place) bumps a generation counter. A compiled function re-checks its assumptions on its next call, and recompiles or drops back to the closure tier if they no longer hold.
+- **Rejection.** A body using threads, or anything else the JS tier doesn't handle, stays on the closure tier. `bel.jitStats()` lists the reasons. The Doom engine compiles all 223 of its hot functions, with none rejected.
+
+The tiers are checked against each other, not just assumed to agree. The Doom engine produces byte-identical frames on all three over 11 golden scenes at three resolutions. A reflection matrix (`test/reflect.mjs`, 67 cases) inspects closures, environments, macros, errors, continuations and code edited in place, and requires the closure and JS tiers to give exactly `ev`'s answers. A fuzzer (`test/fuzz-tiers.mjs`) generates thousands of random programs and compares all three tiers call by call.
 
 ## Jets
 
@@ -276,11 +298,12 @@ Characters on streams are one byte each: `rdc` reads a byte and returns the char
 
 ## Stack depth
 
-The compiler gives tail calls constant stack, but non-tail recursion uses the JavaScript stack, about 440 bytes per nested Bel call:
+The compilers give tail calls constant stack, but non-tail recursion uses the JavaScript stack. How much each nested Bel call costs depends on the tier:
 
 | Where | Nested non-tail Bel calls |
 |---|---|
-| Node, default stack (~1 MB) | ~2,200 |
+| Node, default stack (~1 MB), JS tier | ~6,900 |
+| Node, default stack, `ev` / closure tier | ~5,700 / ~2,300 |
 | Node with `--stack-size=7800` (what `bin/` tools use, via `bin/bigstack.mjs`) | ~18,000 |
 | Chromium Web Worker | ~1,000 |
 
@@ -302,17 +325,26 @@ Everything else is `bel.bel`. On the REPL session in PG's `belexamples.txt`, all
 
 ## Performance
 
-Measured in Node 24 on a 4-core cloud VM:
+One Doom frame (a tic plus drawing, averaged over the 271 frames of the golden scenes), in Node 24 on a 4-core cloud VM:
 
-| Benchmark | Compiled | Tree-walking only (`BEL_NOCOMPILE=1`) |
+| Resolution | JS tier | Closure tier |
+|---|---|---|
+| 160x100 | 23 ms | 66 ms |
+| 320x200 | 47 ms | 160 ms |
+| 640x480 | 161 ms | 554 ms |
+
+In Chrome on an M4 Max MacBook Pro, the JS tier draws a 640x480 frame in about 45 ms on one core, and the browser front end splits each frame's columns across several Web Workers, so 640x480 plays at the full 35 frames a second.
+
+Smaller benchmarks (top-level code, so these run on the closure tier or `ev`):
+
+| Benchmark | Compiled | Tree-walking only (`BEL_TIER=ev`) |
 |---|---|---|
 | Boot: read and evaluate `bel.bel` | 43 ms | |
-| `(fib 22)`, 57,313 calls | 11 ms | 30 ms |
-| A `for` loop summing 1 to 1,000,000 | 79 ms | 108 ms |
-| 100,000 `nth` lookups into a 4,096-element list | 24 ms | 32 ms |
-| One Doom frame at 160x100 | ~41 ms | |
+| `(fib 22)`, 57,313 calls | 11 ms | 22 ms |
+| A `for` loop summing 1 to 1,000,000 | 91 ms | 131 ms |
+| 100,000 `nth` lookups into a 4,096-element list | 28 ms | 37 ms |
 
-The list-indexing benchmark took about 360 ms before the CDR-coding cache, and the Doom frame about 60 ms before the cache and the compiler. For comparison, the spec's own definitions do arithmetic in unary, so `(+ 2 2)` appends two lists of `t`.
+The list-indexing benchmark took about 360 ms before the CDR-coding cache. For comparison, the spec's own definitions do arithmetic in unary, so `(+ 2 2)` appends two lists of `t`.
 
 ## Tests
 
@@ -321,6 +353,12 @@ The list-indexing benchmark took about 360 ms before the CDR-coding cache, and t
 | `node test/basics.mjs` | 108 semantic cases: parameters, destructuring, optional and typed parameters, macros, `where`/`set` on places, `ccc`, `eif`/`onerr`, every native loop and control macro, shadowing, tables and arrays, the reader's intrasymbol syntax, error cases, and the CDR-coding cache under mutation and on circular lists |
 | `node test/examples.mjs` | the 37 results of the REPL session in PG's `belexamples.txt` |
 | `node test/bench.mjs` | the benchmarks above |
+| `node test/tiers.mjs [--gate] [--root DIR]` | runs the suites below under every tier, one process each, and prints a table; `--gate` adds the reflection matrix and the fuzzer |
+| `node test/reflect.mjs` | 67 cases where the closure and JS tiers must give `ev`'s exact answers: closures and environments taken apart, parameters, errors and their messages, `dyn`, `ccc`, places, code changed in place, redefined primitives, tail calls |
+| `node test/fuzz-tiers.mjs [--seed N]` | random programs, each called 20 times so the JS tier compiles them, compared across all three tiers; a mismatch is shrunk to a minimal program |
+| `node test/golden.mjs [--modes lo,hi,640x480]` | Doom's output over 11 scenes, hashed and compared with committed hashes |
+| `node test/jets-off.mjs` | a frame rendered with jets and again with `bel.bel`'s own definitions is identical |
+| `node test/slices.mjs` | `(doom-draw-slice w x0 x1)` stitched for random column partitions equals the full frame |
 
 ## Source map
 
@@ -330,6 +368,7 @@ The list-indexing benchmark took about 360 ms before the CDR-coding cache, and t
 | errors, lookup, binding | `sigerr`, variable lookup, global cells, `bind` and `pass` (parameter binding) |
 | evaluator | `ev` (the tree-walking evaluator with location mode), `applyF`, `callcc`, `where`/`set`, backquote |
 | compiler | `comp`, call nodes, the trampoline, specialized nodes for special forms and core macros |
+| tier 2: Bel to JavaScript | `jitOf`, `jitCompile` (the code generator), the `R` runtime object that generated code calls, assumption checks |
 | reader, printer | the native reader and printer |
 | streams | bit and byte streams, `prc`, queues |
 | natives | the CDR-coding cache, the 16 primitives, the 87 jets |

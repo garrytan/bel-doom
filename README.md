@@ -20,7 +20,7 @@ He meant it. In Bel, numbers are built from lists, and the integers in them are 
 
 So `(+ 2 2)` appends two lists of `t`. There is no floating point, no trig, no vector type (Bel's arrays are lists too), and no way to draw a pixel except writing bits to a stream.
 
-This repository runs Doom in it. It plays Freedoom's E1M1 with BSP rendering, textured walls, floors and sky, light levels, sprites, zombiemen, imps and demons that see you, chase you and shoot back, the pistol, exploding barrels, doors, lifts, pickups, the status bar with Doomguy's face, and sound. The game is about 1,760 lines of Bel, running on Paul Graham's unmodified `bel.bel`. The Bel is purely functional: there is no assignment and there are no loops anywhere in the engine.
+This repository runs Doom in it. It plays Freedoom's E1M1 with BSP rendering, textured walls, floors and sky, light levels, sprites, zombiemen, imps and demons that see you, chase you and shoot back, the pistol, exploding barrels, doors, lifts, pickups, the status bar with Doomguy's face, and sound. The game is about 2,000 lines of Bel, running on Paul Graham's unmodified `bel.bel`, and it plays at 640x480 at a full 35 frames a second in Chrome on a recent Mac. The Bel is purely functional: there is no assignment and there are no loops anywhere in the engine.
 
 ## Doom as a pure function
 
@@ -97,12 +97,12 @@ Bel has no arrays, so everything is lists. The frame is a list of 160 columns of
 
 ## Making a spec run
 
-PG's `bel.bel` is a specification, and running it is a puzzle of its own: closures are lists, the environment is an association list, macros are first-class and expanded on every call, and the numbers are unary. [`interp/bel.js`](interp/bel.js) is one dependency-free JavaScript file (about 2,400 lines) that runs it in Node and in browsers:
+PG's `bel.bel` is a specification, and running it is a puzzle of its own: closures are lists, the environment is an association list, macros are first-class and expanded on every call, and the numbers are unary. [`interp/bel.js`](interp/bel.js) is one dependency-free JavaScript file (about 3,400 lines) that runs it in Node and in browsers:
 
 - **It loads `bel.bel` unmodified**, in about 45 ms, so every one of PG's definitions exists exactly as written. On the REPL session in PG's own [`belexamples.txt`](https://paulgraham.com/bel.html), all 37 results match.
 - **Jets.** Then it swaps 87 hot definitions (`map`, `append`, `nth`, `+`, the reader, the printer...) for native functions with the same behavior. The term comes from Urbit, which does the same thing to its own definitional language.
 - **CDR-coding.** Lisp Machines made lists fast by laying them out as vectors. Here, a list that gets indexed repeatedly quietly grows a hidden vector of its cells, so `nth` becomes constant time, and changing the list's structure throws the vector away. This is what makes texture lookups affordable.
-- **A compiler.** Code is compiled once into JavaScript closures, with tail calls trampolined, so Bel loops written as recursion run in constant stack.
+- **Two compilers.** Code is compiled once into JavaScript closures, with tail calls trampolined, so Bel loops written as recursion run in constant stack. A function that runs often is then compiled again, into JavaScript source, which the JavaScript engine's own optimizing compiler turns into machine code. Its variables become JavaScript locals unless a closure or `scope` could see them, in which case they stay real alist cells. A reflection test suite and a fuzzer check that all three ways of running Bel give the same answers.
 - **Native core macros.** `fn`, `let`, `set`, `for` and friends run natively for as long as they still mean what `bel.bel` says they mean. Redefine one, or bind the name locally, and yours is used.
 
 Everything is real Bel underneath: `(lit clo env parms body)` closures you can take apart with `car`, a `scope` that is a real alist, `where` locations that work through function bodies, `ccc`, `dyn`, `after`, tables, arrays and intrasymbol syntax like `y!a` and `car:cdr`. The full reference is [docs/interpreter.md](docs/interpreter.md).
@@ -117,7 +117,7 @@ Almost. The differences that matter:
 
 Smaller ones (the reader has no `#n=` labels, `chars` lists one-byte characters, `sys` needs a host hook) are in the [full list](docs/interpreter.md#differences-from-belbel). Everything else, including the error behavior, parameter destructuring, optional and type-checked parameters and the way `set` finds places, is `bel.bel`'s own code or behaves identically to it.
 
-You can check the speed tricks don't change the answers. `node test/jets-off.mjs` renders a frame with the native jets, then swaps 55 of them back to PG's own definitions in `bel.bel` (`map`, `append`, `nth`, `reduce` and the rest; only the number functions stay native) and renders the same world again. The two frames are identical, byte for byte; PG's definitions just take 12 seconds instead of 60 milliseconds.
+You can check the speed tricks don't change the answers. `node test/jets-off.mjs` renders a frame with the native jets, then swaps 55 of them back to PG's own definitions in `bel.bel` (`map`, `append`, `nth`, `reduce` and the rest; only the number functions stay native) and renders the same world again. The two frames are identical, byte for byte; PG's definitions just take about 7 seconds instead of a tenth of a second.
 
 ## The 25 minutes
 
@@ -139,14 +139,14 @@ The functional rewrite renders the same frames, byte for byte, as the imperative
 
 | | |
 |---|---|
-| Live in a browser (headless Chromium, 4-core VM, while screen-recording) | 23-26 frames a second at 160x100 |
-| Engine alone in Node | about 41 ms a frame at 160x100, 128 ms at 320x200 |
+| Live in Chrome on an M4 Max MacBook Pro | 35 frames a second (the game's full tic rate) at 640x480 with 4 or more render workers, 33 with 2, 20 on one core; 35 at 320x200 on one core |
+| Engine alone in Node, one core of a 4-core cloud VM | 23 ms a frame at 160x100, 47 ms at 320x200, 161 ms at 640x480 |
 | Startup (boot Bel, parse the WAD, compose textures) | about 3.5 s |
-| Engine | 1,763 lines of Bel in 8 files (1,375 without comments and blank lines) |
-| Interpreter | about 2,400 lines of JavaScript, no dependencies |
-| Interpreter tests | 108/108, and 37/37 on `belexamples.txt` |
+| Engine | 2,018 lines of Bel in 8 files (1,525 without comments and blank lines) |
+| Interpreter | about 3,400 lines of JavaScript, no dependencies |
+| Interpreter tests | 108/108, and 37/37 on `belexamples.txt`, on each of the three tiers; 67/67 reflection cases; 0 differences across tiers on 2,000 fuzzed programs per seed |
 
-The default is Doom's low-detail mode, 160x100. Add `?hires=1` for the full 320x200.
+The default is Doom's low-detail mode, 160x100. Click 320x200 or 640x480 under the game, or add `?res=640x480`. At the larger sizes the page splits each frame's columns across several Web Workers, each running its own copy of the game in lockstep, so 640x480 wants a machine with several cores; `?workers=N` sets the count.
 
 ## Run it
 
@@ -215,5 +215,6 @@ This repository's own code is MIT licensed; see [LICENSE](LICENSE). The license 
 
 ## Changelog
 
+- 2026-10-06: 640x480 at 35 frames a second: a second compiler (Bel to JavaScript source), a renderer that allocates half as much, and a multi-worker renderer in the browser.
 - 2026-10-06: README rewritten for a general audience; full interpreter reference in `docs/interpreter.md`; GitHub Pages entry point; MIT license.
 - 2026-10-05: First version: interpreter, functional Doom engine, browser, terminal and video front ends, sound.

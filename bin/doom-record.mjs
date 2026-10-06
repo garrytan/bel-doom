@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Headless recorder: runs the Bel Doom engine on a scripted key sequence and writes PNGs, MP4 and/or GIF.
 //   node bin/doom-record.mjs [--script "w:35 wd:20 f:5 -:10"] [--script-file F] [--frames N]
-//        [--out DIR] [--mp4 FILE] [--gif FILE] [--wav FILE] [--raw FILE|-] [--scale S] [--gif-scale S] [--gif-fps F] [--fps 35] [--hires | --res WxH] [--tier closure]
+//        [--out DIR] [--mp4 FILE] [--gif FILE] [--wav FILE] [--raw FILE|-] [--scale S] [--gif-scale S] [--gif-fps F] [--fps 35] [--hires | --res WxH] [--tier ev|closure|js]
 //        [--sounds wad/sounds.wad] [--audio-rate 22050] [--no-audio] [--wad wad/e1m1.wad] [--root DIR] [--quiet]
 // A script is whitespace/comma separated KEYS:TICS steps (KEYS from "wsadqerfu", "-" or empty = none).
 // One tic = one doom-frame call = one output frame. --frames N truncates the script or pads it with idle tics.
@@ -65,7 +65,7 @@ const eng = bootEngine({
   wad: opt.wad,
   hires: opt.hires,
   res: parseRes(opt.res),
-  compile: opt.tier === 'closure' ? false : undefined,
+  tier: opt.tier || undefined,
   status: (s) => say(`bel-doom: ${s}`),
   log: (s) => { if (s && !opt.quiet) process.stderr.write(s.replace(/^/gm, '  | ').replace(/  \| $/, '')); },
 });

@@ -3,7 +3,7 @@
 // paused; the whole per-tic key script (doom-record format, one step per engine tic) goes to the worker,
 // which takes one step per tic in its own 35 Hz scheduler, independent of how many frames get drawn.
 //   node bin/doom-live.mjs --script-file bin/demo-route.txt --out live.mp4 [--root DIR] [--res WxH | --hires]
-//        [--tier closure] [--port 8099] [--width 1100] [--height 800] [--tail 35] [--chrome chromium] [--no-video]
+//        [--tier ev|closure|js] [--workers N] [--slices cut] [--checksums FILE] [--port 8099] [--width 1100] [--height 800] [--tail 35] [--chrome chromium] [--no-video]
 // Prints presented fps (frames drawn per second), game speed (tics per second, 35 is real time) and the
 // p50/p95 time between presented frames.
 import fs from 'node:fs';
@@ -13,7 +13,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const opt = { root: path.resolve(here, '..'), script: null, out: 'live.mp4', hires: false, res: null, tier: null, video: true, port: 8099, width: 1100, height: 800, tail: 35, chrome: 'chromium' };
+const opt = { root: path.resolve(here, '..'), script: null, out: 'live.mp4', hires: false, res: null, tier: null, workers: null, slices: null, checksums: null, video: true, port: 8099, width: 1100, height: 800, tail: 35, chrome: 'chromium' };
 const argv = process.argv.slice(2);
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i], v = () => argv[++i];
@@ -24,6 +24,9 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--hires') opt.hires = true;
   else if (a === '--res') opt.res = v();
   else if (a === '--tier') opt.tier = v();
+  else if (a === '--workers') opt.workers = v();
+  else if (a === '--slices') opt.slices = v();
+  else if (a === '--checksums') opt.checksums = v();
   else if (a === '--no-video') opt.video = false;
   else if (a === '--port') opt.port = Number(v());
   else if (a === '--width') opt.width = Number(v());
@@ -85,10 +88,12 @@ handlers['Page.screencastFrame'] = (p) => {
 handlers['Runtime.exceptionThrown'] = (p) => console.error('page exception:', p.exceptionDetails.text, p.exceptionDetails.exception && p.exceptionDetails.exception.description);
 
 const ticLog = [];
+let initInfo = null;
 let onTic = null;
 handlers['Runtime.bindingCalled'] = (p) => {
   if (p.name !== '__belFrame') return;
   const m = JSON.parse(p.payload);
+  if (m.init) initInfo = m.init;
   ticLog.push({ tic: m.tic, keys: m.keys, at: performance.now() });
   if (onTic) onTic(m.tic);
 };
@@ -99,34 +104,30 @@ await send('Emulation.setDeviceMetricsOverride', { width: opt.width, height: opt
 await send('Runtime.addBinding', { name: '__belFrame' });
 await send('Page.addScriptToEvaluateOnNewDocument', { source: `{
   window.__belFrames = [];
-  const W = window.Worker;
-  window.Worker = class extends W {
-    constructor(...a) {
-      super(...a);
-      window.__belWorker = this;
-      this.addEventListener('message', (e) => {
-        const m = e.data;
-        if (!m) return;
-        if (m.type === 'init') window.__belFrame(JSON.stringify({ tic: 0 }));
-        if (m.type === 'frame') {
-          window.__belFrames.push([performance.now(), m.tic, m.tics || 1, m.step || 0, m.render || 0, m.write || 0, m.dropped || 0]);
-          window.__belFrame(JSON.stringify({ tic: m.tic }));
-        }
-      });
+  addEventListener('beldoom-init', (e) => window.__belFrame(JSON.stringify({ tic: 0, init: e.detail })));
+  addEventListener('beldoom-frame', (e) => {
+    const m = e.detail;
+    window.__belFrames.push([performance.now(), m.tic, m.tics, m.step, m.render, m.write, m.dropped, m.workers, m.desyncs]);
+    if (window.__belSums) {
+      let h = 0x811c9dc5;
+      for (let i = 0; i < m.frame.length; i++) h = Math.imul(h ^ m.frame[i], 16777619);
+      window.__belSums.push([m.tic, h >>> 0]);
     }
-  };
+    window.__belFrame(JSON.stringify({ tic: m.tic }));
+  });
 }` });
-const url = `http://127.0.0.1:${opt.port}/web/?paused=1${opt.res ? `&res=${opt.res}` : opt.hires ? '&hires=1' : ''}${opt.tier ? `&tier=${opt.tier}` : ''}`;
+const url = `http://127.0.0.1:${opt.port}/web/?paused=1${opt.res ? `&res=${opt.res}` : opt.hires ? '&hires=1' : ''}${opt.tier ? `&tier=${opt.tier}` : ''}${opt.workers ? `&workers=${opt.workers}` : ''}${opt.slices ? `&slices=${opt.slices}` : ''}`;
 console.error(`doom-live: loading ${url}`);
 await send('Page.navigate', { url });
 
-await new Promise((res) => { onTic = () => { onTic = null; res(); }; });
-console.error(`doom-live: engine loaded (page started paused), recording ${steps.length} tics`);
+await new Promise((res, rej) => { const t = setTimeout(() => rej(new Error('the page did not finish loading in 120 s')), 120000); onTic = () => { clearTimeout(t); onTic = null; res(); }; });
+console.error(`doom-live: engine loaded (page started paused): ${initInfo.w}x${initInfo.h}, ${initInfo.workers} worker(s), ` +
+  `${initInfo.sliceApi ? 'doom-draw-slice' : initInfo.split ? 'slices cut from doom-draw' : 'doom-frame only'}; recording ${steps.length} tics`);
 if (opt.video) await send('Page.startScreencast', { format: 'jpeg', quality: 85, maxWidth: opt.width, maxHeight: opt.height, everyNthFrame: 1 });
 await sleep(opt.video ? 1500 : 200);
 
 // The worker takes script step k on tic k + 1; Esc unpauses the page and starts the clock.
-await send('Runtime.evaluate', { expression: `window.__belWorker.postMessage({ type: 'script', steps: ${JSON.stringify(steps)} })` });
+await send('Runtime.evaluate', { expression: `${opt.checksums ? 'window.__belSums = [];' : ''} window.belDoom.script(${JSON.stringify(steps)})` });
 const wallStart = performance.now();
 await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', code: 'Escape', key: 'Escape', windowsVirtualKeyCode: 27 });
 await send('Input.dispatchKeyEvent', { type: 'keyUp', code: 'Escape', key: 'Escape', windowsVirtualKeyCode: 27 });
@@ -143,6 +144,7 @@ if (opt.video) {
 const log = (await send('Runtime.evaluate', { expression: 'window.__belFrames', returnByValue: true })).result.value
   .filter(([, tic]) => tic <= endTic);
 const span = (log[log.length - 1][0] - log[0][0]) / 1000;
+if (opt.checksums) fs.writeFileSync(opt.checksums, JSON.stringify((await send('Runtime.evaluate', { expression: 'window.__belSums', returnByValue: true })).result.value));
 const fps = (log.length - 1) / span;
 const speed = (log[log.length - 1][1] - log[0][1]) / span;
 const gaps = log.slice(1).map((f, i) => f[0] - log[i][0]).sort((a, b) => a - b);
@@ -151,7 +153,7 @@ const mean = (i) => log.reduce((a, f) => a + f[i], 0) / log.length;
 console.error(`doom-live: ${steps.length} tics, ${log.length} frames in ${wall.toFixed(1)} s: ${fps.toFixed(1)} fps presented, ` +
   `game speed ${speed.toFixed(1)} tics/s, frame time p50 ${pct(0.5).toFixed(0)} ms p95 ${pct(0.95).toFixed(0)} ms, ` +
   `${mean(2).toFixed(2)} tics/frame, step ${mean(3).toFixed(1)} ms + render ${mean(4).toFixed(1)} ms + write ${mean(5).toFixed(1)} ms per frame, ` +
-  `${log[log.length - 1][6]} tics dropped (page: ${pageFps})`);
+  `${log[log.length - 1][6]} tics dropped, ${log[log.length - 1][7]} worker(s), ${log[log.length - 1][8]} desyncs (page: ${pageFps})`);
 if (opt.video) {
   const list = frames.map((f, i) => `file '${f.file}'\nduration ${Math.max(0.001, ((frames[i + 1] || f).t - f.t) || 1 / 30).toFixed(4)}`).join('\n') + `\nfile '${frames[frames.length - 1].file}'\n`;
   fs.writeFileSync(path.join(tmp, 'list.txt'), list);

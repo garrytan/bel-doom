@@ -63,7 +63,7 @@ async function runChild(mode) {
   else w0 = bel.call('doom-init', 'wad/e1m1.wad');
   const initOut = bel.takeOutput();
   let [W, H] = dims || [160, 100];
-  const result = { mode, size: `${W}x${H}`, initMs: Math.round(performance.now() - t0), scenes: { init: sha(initOut) } };
+  const result = { mode, tier: bel.tier, size: `${W}x${H}`, initMs: Math.round(performance.now() - t0), scenes: { init: sha(initOut) } };
   const pal = initOut.subarray(initOut.indexOf(80) + 1, initOut.indexOf(80) + 769);
   let frames = 0, ms = 0;
   for (const [name, edits, script] of SCENES) {
@@ -115,7 +115,7 @@ async function runParent() {
     const bad = want ? Object.keys(r.scenes).filter((s) => r.scenes[s] !== want[s]) : [];
     const status = !want ? 'NO EXPECTED HASHES' : bad.length ? `FAIL (${bad.join(', ')})` : opt.update && !r.mode.endsWith('-nocompile') ? 'recorded' : 'ok';
     failures += want ? bad.length : 1;
-    console.log(`${r.mode.padEnd(16)} ${r.size.padEnd(8)} init ${String(r.initMs).padStart(5)} ms, ${r.frames} frames at ${r.msPerFrame} ms  ${status}`);
+    console.log(`${r.mode.padEnd(16)} ${r.size.padEnd(8)} init ${String(r.initMs).padStart(5)} ms, ${r.frames} frames at ${r.msPerFrame} ms  ${status} (tier ${r.tier})`);
   }
   if (opt.update) {
     if (!failures) fs.writeFileSync(HASHES, JSON.stringify(expected, null, 2) + '\n');
