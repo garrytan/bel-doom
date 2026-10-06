@@ -117,6 +117,13 @@
   (apply pr (render w))
   w)
 
+; Draw only screen columns x0..x1: the F packet holds (x1 - x0 + 1) columns,
+; the same bytes as those columns of the whole frame.
+(def doom-draw-slice (w x0 x1)
+  (prc \F)
+  (apply pr (render-slice w x0 x1))
+  w)
+
 ; A tic and its frame, for hosts that draw every tic.
 (def doom-frame (w (o keys ""))
   (doom-draw (doom-tick w keys)))
