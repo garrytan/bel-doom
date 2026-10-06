@@ -947,7 +947,9 @@ function globeList() {
 // JS stack, and run() trampolines it.  Anything unusual (where-mode, dyn,
 // after, ccc, def, mac) is delegated to ev, so the two agree by construction.
 
-let COMPILE = !(typeof process !== 'undefined' && process.env && process.env.BEL_NOCOMPILE);
+const ENV = typeof process !== 'undefined' && process.env ? process.env : {};
+let COMPILE = !ENV.BEL_NOCOMPILE && ENV.BEL_TIER !== 'ev';
+let JSTIER = COMPILE && ENV.BEL_TIER !== 'closure';
 const TC = { env: null, node: null };
 
 function run(node, env) {
@@ -2334,13 +2336,17 @@ let booted = false;
  * @param {() => number} [opts.stdin]  next byte of the default input stream (ins = nil), or -1 at end
  * @param {string} [opts.belSource]  text of bel.bel; defaults to readFile('interp/bel.bel')
  * @param {(command: string) => boolean} [opts.sys]  implementation of the sys primitive
- * @param {boolean} [opts.compile]  false runs everything on the closure tier (same as BEL_NOCOMPILE=1)
+ * @param {boolean} [opts.compile]  false runs everything on the tree-walking evaluator (same as BEL_NOCOMPILE=1)
+ * @param {'ev'|'closure'|'js'} [opts.tier]  highest execution tier to use (also BEL_TIER); default 'js'
  */
 export class Bel {
   constructor(opts = {}) {
     if (booted) throw new Error('only one Bel instance per JS realm');
     booted = true;
-    if (opts.compile === false) COMPILE = false;
+    if (opts.compile === false || opts.tier === 'ev') COMPILE = false;
+    if (opts.tier === 'closure') JSTIER = false;
+    if (!COMPILE) JSTIER = false;
+    this.tier = !COMPILE ? 'ev' : JSTIER ? 'js' : 'closure';
     host = {
       readFile: opts.readFile || (() => null),
       writeFile: opts.writeFile || null,
