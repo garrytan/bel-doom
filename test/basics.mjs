@@ -117,7 +117,7 @@ for (const [src, want] of cases) {
   try { got = bel.print(bel.evalString(src)); } catch (e) { got = 'ERR ' + e.message; }
   if (want !== null && got !== want) { fail++; console.log('FAIL', src, '=>', got, 'want', want); }
 }
-console.log(`${cases.length - fail}/${cases.length} passed`);
+console.log(`${cases.length - fail}/${cases.length} passed (tier ${bel.tier})`);
 if (fail) process.exit(1);
 // CDR-coding cache must stay correct across structural mutation
 {

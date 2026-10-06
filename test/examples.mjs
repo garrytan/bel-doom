@@ -55,5 +55,5 @@ for (const [src, want] of session) {
   if (got === want) pass++;
   else console.log('FAIL', src, '\n  got ', got, '\n  want', want);
 }
-console.log(`${pass}/${session.length} belexamples.txt results match`);
+console.log(`${pass}/${session.length} belexamples.txt results match (tier ${bel.tier})`);
 if (pass !== session.length) process.exit(1);

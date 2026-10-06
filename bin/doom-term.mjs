@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Terminal Doom player: runs the Bel engine in Node and draws truecolor half-block frames.
-// Usage: node bin/doom-term.mjs [--hires | --res WxH] [--tier closure] [--wad wad/e1m1.wad] [--root DIR] [--frames N] [--keys KEYS] [--hold MS] [--first-hold MS] [--bell]
+// Usage: node bin/doom-term.mjs [--hires | --res WxH] [--tier ev|closure|js] [--wad wad/e1m1.wad] [--root DIR] [--frames N] [--keys KEYS] [--hold MS] [--first-hold MS] [--bell]
 // Sound events are ignored, or ring the terminal bell with --bell.
 // Keys: WASD/arrows move, Q/E or Alt+left/right strafe, F fire, Space/U use, R toggles run
 // (Shift+letter/arrow also runs), Esc or Ctrl-C quits.
@@ -24,7 +24,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--hold') opt.hold = Number(v());
   else if (a === '--first-hold') opt.firstHold = Number(v());
   else if (a === '--bell') opt.bell = true;
-  else { console.error('usage: node bin/doom-term.mjs [--hires | --res WxH] [--tier closure] [--wad PATH] [--root DIR] [--frames N] [--keys KEYS] [--hold MS] [--first-hold MS] [--bell]'); process.exit(2); }
+  else { console.error('usage: node bin/doom-term.mjs [--hires | --res WxH] [--tier ev|closure|js] [--wad PATH] [--root DIR] [--frames N] [--keys KEYS] [--hold MS] [--first-hold MS] [--bell]'); process.exit(2); }
 }
 
 const { bootEngine, parseRes, paletteRGBA32, columnsToRows, scaleIndexed, TIC_RATE } = await import(pathToFileURL(path.join(here, '../web/protocol.js')).href);
@@ -39,7 +39,7 @@ const eng = bootEngine({
   wad: opt.wad,
   hires: opt.hires,
   res: parseRes(opt.res),
-  compile: opt.tier === 'closure' ? false : undefined,
+  tier: opt.tier || undefined,
   status: (s) => process.stderr.write(`bel-doom: ${s}\n`),
   log: (s) => { if (s) { for (const l of s.split('\n')) if (l.trim()) logs.push(l); while (logs.length > 50) logs.shift(); } },
 });

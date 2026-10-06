@@ -1,4 +1,5 @@
-import { displaySize, paletteRGBA32, loadSounds, parseRes } from './protocol.js';
+import { displaySize, paletteRGBA32, loadSounds, parseRes, TIC_RATE } from './protocol.js';
+import { createPool, autoWorkers } from './pool.js';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('screen');
@@ -6,8 +7,6 @@ const ctx = canvas.getContext('2d', { alpha: false });
 const overlay = $('overlay');
 const params = new URLSearchParams(location.search);
 
-const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
-worker.onerror = (e) => fail(`worker failed to start: ${e.message || 'see console'}`);
 
 let w = 0, h = 0, pal32 = null, src = null, srcCtx = null, img = null, img32 = null;
 let latest = null, drawPending = false, loading = true, paused = false;
@@ -15,7 +14,7 @@ const loadStart = performance.now();
 const frameTimes = [];
 const ticTimes = [];
 const stats = [];
-let lastTic = 0, dropped = 0, split = false, debug = false;
+let lastTic = 0, dropped = 0, split = false, debug = false, poolInfo = [], notes = [];
 
 const sound = { lumps: null, ctx: null, gain: null, buffers: new Map(), voices: [], missing: new Set(),
   muted: localStorage.getItem('beldoom-muted') === '1', error: null };
@@ -58,19 +57,24 @@ function soundBuffer(name) {
 
 function stopVoice(v) { v.onended = null; try { v.stop(); } catch {} }
 
-function playSounds(names) {
-  if (!names || !names.length || sound.muted || !sound.lumps || !sound.ctx || sound.ctx.state !== 'running') return;
-  for (const name of new Set(names)) {
-    const buf = soundBuffer(name);
-    if (!buf) continue;
-    while (sound.voices.length >= 8) stopVoice(sound.voices.shift());
-    const v = sound.ctx.createBufferSource();
-    v.buffer = buf;
-    v.connect(sound.gain);
-    v.onended = () => { const i = sound.voices.indexOf(v); if (i >= 0) sound.voices.splice(i, 1); };
-    v.start();
-    sound.voices.push(v);
-  }
+// groups: the sound events of each tic in the frame, oldest first; each tic's group starts one tic
+// (1/35 s) after the previous one, so a catch-up batch keeps its spacing.
+function playSounds(groups) {
+  if (!groups || !groups.length || sound.muted || !sound.lumps || !sound.ctx || sound.ctx.state !== 'running') return;
+  const now = sound.ctx.currentTime;
+  groups.forEach((names, i) => {
+    for (const name of names) {
+      const buf = soundBuffer(name);
+      if (!buf) continue;
+      while (sound.voices.length >= 8) stopVoice(sound.voices.shift());
+      const v = sound.ctx.createBufferSource();
+      v.buffer = buf;
+      v.connect(sound.gain);
+      v.onended = () => { const j = sound.voices.indexOf(v); if (j >= 0) sound.voices.splice(j, 1); };
+      v.start(now + i / TIC_RATE);
+      sound.voices.push(v);
+    }
+  });
 }
 
 function toggleMute() {
@@ -119,37 +123,38 @@ function showStats(fps, speed) {
     ['fps', fps.toFixed(1)], ['game', `${speed.toFixed(1)} tics/s`], ['tics/frame', avg('tics').toFixed(2)],
     ['step', `${avg('step').toFixed(1)} ms`], ['render', `${avg('render').toFixed(1)} ms`], ['write', `${avg('write').toFixed(1)} ms`],
     ['transfer', `${avg('transfer').toFixed(1)} ms`], ['draw', `${avg('draw').toFixed(1)} ms`], ['dropped', `${dropped} tics`],
+    ['workers', `${poolInfo.length}`],
+    ...poolInfo.map((p) => [`  w${p.index}`, `${p.step.toFixed(1)} + ${p.render.toFixed(1)} ms  cols ${p.x0}-${p.x1}`]),
+    ...notes.slice(-2).map((n) => ['note', n]),
   ];
   $('debug').textContent = rows.map(([k, v]) => `${k.padEnd(11)}${v}`).join('\n');
 }
 
-worker.onmessage = (e) => {
-  const m = e.data;
-  if (m.type === 'status') { setOverlay('LOADING', m.text); }
-  else if (m.type === 'log') { console.log('[bel]', m.text.replace(/\n$/, '')); }
-  else if (m.type === 'error') { fail(m.text); }
-  else if (m.type === 'init') {
-    ({ w, h, split } = m);
-    pal32 = paletteRGBA32(m.palette);
-    src = document.createElement('canvas'); src.width = w; src.height = h;
-    srcCtx = src.getContext('2d');
-    img = srcCtx.createImageData(w, h);
-    img32 = new Uint32Array(img.data.buffer);
-    const [dw, dh] = displaySize(w, h, Math.max(1, Math.round(800 / w)));
-    canvas.width = dw; canvas.height = dh;
-    if (startPaused) { loading = false; paused = true; setOverlay('READY', 'press Esc to start'); }
-    else setOverlay('LOADING', 'running the first tic');
-    console.log(`[bel-doom] ready in ${(m.ms / 1000).toFixed(1)} s, screen ${w}x${h} -> ${dw}x${dh}`);
-  } else if (m.type === 'frame') {
-    if (loading) { loading = false; overlay.classList.add('hidden'); }
-    latest = m.frame; lastTic = m.tic; dropped = m.dropped;
-    playSounds(m.sounds);
-    ticTimes.push([performance.now(), m.tic]);
-    stats.push({ tics: m.tics, step: m.step, render: m.render, write: m.write, transfer: performance.timeOrigin + performance.now() - m.sentAt, draw: 0 });
-    if (stats.length > 30) stats.shift();
-    if (!drawPending) { drawPending = true; requestAnimationFrame(draw); }
-  }
-};
+function onInit(m) {
+  ({ w, h, split } = m);
+  pal32 = paletteRGBA32(m.palette);
+  src = document.createElement('canvas'); src.width = w; src.height = h;
+  srcCtx = src.getContext('2d');
+  img = srcCtx.createImageData(w, h);
+  img32 = new Uint32Array(img.data.buffer);
+  const [dw, dh] = displaySize(w, h, Math.max(1, Math.round(800 / w)));
+  canvas.width = dw; canvas.height = dh;
+  if (startPaused) { loading = false; paused = true; setOverlay('READY', 'press Esc to start'); }
+  else setOverlay('LOADING', 'running the first tic');
+  console.log(`[bel-doom] ready in ${(m.ms / 1000).toFixed(1)} s, screen ${w}x${h} -> ${dw}x${dh}, ${m.workers} worker(s)`);
+  dispatchEvent(new CustomEvent('beldoom-init', { detail: { w, h, workers: m.workers, split: m.split, sliceApi: m.sliceApi } }));
+}
+
+function onFrame(m) {
+  if (loading) { loading = false; overlay.classList.add('hidden'); }
+  latest = m.frame; lastTic = m.tic; dropped = m.dropped; poolInfo = m.workers;
+  playSounds(m.sounds);
+  ticTimes.push([performance.now(), m.tic]);
+  stats.push({ tics: m.tics, step: m.step, render: m.render, write: m.write, transfer: Math.max(0, m.took - m.step - m.render - m.write), draw: 0 });
+  if (stats.length > 30) stats.shift();
+  dispatchEvent(new CustomEvent('beldoom-frame', { detail: { frame: m.frame, tic: m.tic, tics: m.tics, step: m.step, render: m.render, write: m.write, dropped: m.dropped, workers: m.workers.length, desyncs: m.desyncs } }));
+  if (!drawPending) { drawPending = true; requestAnimationFrame(draw); }
+}
 
 function draw() {
   drawPending = false;
@@ -198,7 +203,7 @@ function syncKeys() {
   const k = keyString();
   if (k === sentKeys) return;
   sentKeys = k;
-  worker.postMessage({ type: 'keys', keys: paused ? '' : k });
+  if (pool) pool.setKeys(paused ? '' : k);
   $('held').innerHTML = `keys <b>${k || '-'}</b>`;
 }
 
@@ -209,7 +214,7 @@ addEventListener('keydown', (e) => {
   if (e.code === 'Backquote' && !e.repeat) { debug = !debug; $('debug').classList.toggle('hidden', !debug); return; }
   if (e.code === 'Escape' && !loading && src) {
     paused = !paused;
-    worker.postMessage({ type: 'pause', paused: paused || document.hidden });
+    pool.pause(paused || document.hidden);
     if (paused) setOverlay('PAUSED', 'press Esc to resume'); else overlay.classList.add('hidden');
     sentKeys = null; syncKeys();
     return;
@@ -229,7 +234,7 @@ const releaseAll = () => { held.clear(); syncKeys(); };
 addEventListener('blur', releaseAll);
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) releaseAll();
-  worker.postMessage({ type: 'pause', paused: paused || document.hidden });
+  if (pool) pool.pause(paused || document.hidden);
 });
 
 addEventListener('beforeunload', (e) => { if (lastTic > 0) e.preventDefault(); });
@@ -247,4 +252,19 @@ for (const size of ['160x100', '320x200', '640x480']) {
   if (size === current) a.className = 'current';
   $('detail').append(a, ' ');
 }
-worker.postMessage({ type: 'start', wad: params.get('wad') || 'wad/e1m1.wad', hires, res, tier: params.get('tier'), paused: startPaused });
+const workersParam = params.get('workers');
+const pool = createPool({
+  count: Number(workersParam) > 0 ? Math.min(16, Number(workersParam)) : autoWorkers(),
+  auto: !(Number(workersParam) > 0),
+  start: { wad: params.get('wad') || 'wad/e1m1.wad', hires, res, tier: params.get('tier'), cutSlices: params.get('slices') === 'cut' },
+  paused: startPaused,
+  on: {
+    status: (text) => setOverlay('LOADING', text),
+    log: (text) => console.log('[bel]', text.replace(/\n$/, '')),
+    error: fail,
+    note: (text) => { notes.push(text); console.warn('[bel-doom]', text); },
+    init: onInit,
+    frame: onFrame,
+  },
+});
+window.belDoom = { script: (steps) => pool.script(steps), get workers() { return pool.workers; }, debug: pool.debug };

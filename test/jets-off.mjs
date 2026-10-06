@@ -34,4 +34,4 @@ bel.setJets(true);
 console.log(`jets on:  ${on}  (${msOn.toFixed(0)} ms)`);
 console.log(`jets off: ${off}  (${(msOff / 1000).toFixed(1)} s, ${switched.length} jets replaced by bel.bel's definitions)`);
 if (on !== off) { console.log('FAIL: frames differ'); process.exit(1); }
-console.log('identical');
+console.log(`identical (tier ${bel.tier})`);
