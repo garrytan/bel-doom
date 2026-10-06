@@ -14,7 +14,7 @@ mkdir -p "$OUT/demo" "$OUT/live"
 [ -f wad/sounds.wad ] || python3 tools/mksounds.py
 
 node bin/doom-record.mjs "${ROOTARG[@]}" --quiet --script-file "$ROUTE" \
-  --mp4 "$OUT/demo/demo.mp4" --gif "$OUT/demo/demo.gif" --gif-fps 20 --wav "$OUT/demo/demo.wav"
+  --mp4 "$OUT/demo/demo.mp4" --gif "$OUT/demo/demo.gif" --gif-fps 17.5 --wav "$OUT/demo/demo.wav"
 N=$(ffprobe -v error -select_streams v -count_packets -show_entries stream=nb_read_packets -of csv=p=0 "$OUT/demo/demo.mp4")
 ffmpeg -v error -y -i "$OUT/demo/demo.mp4" -vf "select='not(mod(n\,$(( (N + 7) / 8 ))))',scale=320:240,tile=4x2" -frames:v 1 "$OUT/demo/contact.png"
 
