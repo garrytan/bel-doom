@@ -10,7 +10,7 @@ const params = new URLSearchParams(location.search);
 
 
 let w = 0, h = 0, pal32 = null, src = null, srcCtx = null, img = null, img32 = null;
-let latest = null, drawPending = false, loading = true, paused = false;
+let latest = null, drawPending = false, loading = true, paused = false, dead = false;
 const loadStart = performance.now();
 const frameTimes = [];
 const ticTimes = [];
@@ -109,6 +109,7 @@ function setOverlay(big, text, isError) {
 function fail(text) {
   loading = false;
   paused = true;
+  dead = true;
   running();
   setOverlay('ERROR', text, true);
   console.error(text);
@@ -227,7 +228,7 @@ function syncKeys() {
 function toggleDebug() { debug = !debug; $('debug').classList.toggle('hidden', !debug); }
 
 function togglePause() {
-  if (loading || !src) return;
+  if (loading || !src || dead) return;
   paused = !paused;
   pool.pause(paused || document.hidden);
   if (paused) { touch?.reset(); setOverlay('PAUSED', touch ? 'tap to resume' : 'press Esc to resume'); }
