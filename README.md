@@ -15,6 +15,7 @@ The host programs are the "VGA card, sound card and keyboard". They turn the pal
 ```sh
 node bin/serve.mjs 8080        # then open http://localhost:8080  (add ?hires=1 for 320x200)
 node bin/doom-live.mjs --script-file bin/demo-route.txt --out live.mp4   # record the page in real time
+bin/make-demos.sh              # both videos from bin/demo-route.txt (regenerate it with node bin/demo-bot.mjs)
 node bin/doom-term.mjs         # in a terminal, with truecolor half-block pixels
 node bin/doom-record.mjs --mp4 demo.mp4 --gif demo.gif   # scripted run to video, with sound
 ```
@@ -69,7 +70,7 @@ Bel has no arrays, so the engine is built from lists. The frame protocol is colu
 | PG's `belexamples.txt` REPL session (`node test/examples.mjs`) | 37/37 results match (2/3 prints as a float) |
 | Semantics tests (`node test/basics.mjs`) | 108/108 |
 | Functional style (`node tools/lint-idiom.mjs`) | clean |
-| Live in the browser, 160x100 (headless Chromium, 4-core VM) | 26 fps wall-clock over 1,102 tics, page counter 25-34 fps |
+| Live in the browser, 160x100 (headless Chromium, 4-core VM, while screen-recording) | 23-26 fps wall-clock over 900-1,175 tic runs, page counter 25-34 fps |
 | Engine only, 160x100, Node | ~40-46 ms per frame (22-25 fps) |
 | Engine only, 320x200, Node | ~128 ms per frame (~8 fps) |
 | Startup (bel.bel, engine, WAD parse, texture compositing) | ~3.7 s |
