@@ -1381,6 +1381,7 @@ const JIT_THRESHOLD = 16;
 const codePairs = new WeakSet();
 function noteMutation(p) {
   ENV_EPOCH++;
+  R.ee = ENV_EPOCH;
   if (codePairs.has(p)) CODE_EPOCH++;
 }
 
@@ -1428,7 +1429,12 @@ function jitOf(f) {
     if (++je.calls < JIT_THRESHOLD) return null;
     let res = null;
     try {
-      res = jitCompile(je.parms, je.body);
+      try {
+        res = jitCompile(je.parms, je.body, false);
+      } catch (ex) {
+        if (!(ex instanceof JitReject) || ex.message !== 'creates a closure') throw ex;
+        res = jitCompile(je.parms, je.body, true);
+      }
     } catch (ex) {
       if (!(ex instanceof JitReject)) throw ex;
       jitStats.rejected++;
@@ -1532,6 +1538,29 @@ const R = {
     for (let p = env; p instanceof Pair; p = p.d) if (p.a instanceof Pair && p.a.a === s) return p.a.d;
     return NIL;
   },
+  ee: 0,
+  lk(env, s) {
+    for (let p = env; p instanceof Pair; p = p.d) if (p.a instanceof Pair && p.a.a === s) return p.a.d;
+    return R.unb(s);
+  },
+  setIn(env, s, v) {
+    for (let p = env; p instanceof Pair; p = p.d) if (p.a instanceof Pair && p.a.a === s) { assignCell(p.a, v); return v; }
+    return R.setg(s, v);
+  },
+  cellIn(env, s) {
+    for (let p = env; p instanceof Pair; p = p.d) if (p.a instanceof Pair && p.a.a === s) return p.a;
+    return new Pair(s, NIL);
+  },
+  destr2(pat, val, env) { return pass(pat, val, env); },
+  evEnv(form, env) { return ev(form, env, 0); },
+  mkclo(env, parms, body) { return makeClo(env, parms, body); },
+  mkrfn(env, name, parms, body) {
+    const cell = new Pair(name, NIL);
+    const clo = makeClo(new Pair(cell, env), parms, body);
+    cell.d = clo;
+    return clo;
+  },
+  globe() { return globeList(); },
   less(a, b) { return less(a, b); },
   mistype() { return sigerr(sym('mistype')); },
   num(x) { return num(x); },
@@ -1545,7 +1574,7 @@ const CORE_FORMS = new Set([FN, DO, SET, DEF, MAC, LET, RFN, WHEN, UNLESS, AND, 
 const FALLBACK_FORMS = new Set([WHERE, DYN, AFTER, CCC, BQUOTE, TIL, LOOP]);
 const DANGEROUS = new Set(['fn', 'rfn', 'afn', 'def', 'mac', 'macro', 'scope', 'globe', 'thread', 'loc', 'vir', 'form', 'syn', 'com']);
 
-function jitCompile(parms, body) {
+function jitCompile(parms, body, CELLS) {
   const K = [];
   const kmap = new Map();
   const k = (v) => {
@@ -1634,8 +1663,9 @@ function jitCompile(parms, body) {
   const varRef = (s, scope) => {
     varSyms.add(s);
     const local = lookupLocal(scope, s);
-    if (local !== null) return local;
-    if (s === SCOPE || s === GLOBE) reject('scope');
+    if (local !== null) return CELLS ? `(R.ee === $ee ? ${local}.d : R.lk($env, ${k(s)}))` : local;
+    if (s === SCOPE) { if (!CELLS) reject('creates a closure'); return '$env'; }
+    if (s === GLOBE) { if (!CELLS) reject('creates a closure'); return 'R.globe()'; }
     if (s.lexb) {
       let i = freeIndex.get(s);
       if (i === undefined) { i = freeSyms.length; freeSyms.push(s); freeIndex.set(s, i); }
@@ -1650,7 +1680,11 @@ function jitCompile(parms, body) {
   const varSet = (s, valExpr, scope) => {
     varSyms.add(s);
     const local = lookupLocal(scope, s);
-    if (local !== null) return `(${local} = ${valExpr})`;
+    if (local !== null) {
+      if (!CELLS) return `(${local} = ${valExpr})`;
+      const v = tmp();
+      return `(${v} = ${valExpr}, R.ee === $ee ? R.assign(${local}, ${v}) : R.setIn($env, ${k(s)}, ${v}))`;
+    }
     if (s.lexb) {
       let i = freeIndex.get(s);
       if (i === undefined) { i = freeSyms.length; freeSyms.push(s); freeIndex.set(s, i); }
@@ -1663,6 +1697,7 @@ function jitCompile(parms, body) {
 
   // A fallback form runs in ev on an alist built from the current locals.
   const fallback = (e, scope) => {
+    if (CELLS) { for (const [s] of scope) varSyms.add(s); return `R.evEnv(${k(e)}, $env)`; }
     scanDanger(e);
     for (const [s] of scope) varSyms.add(s);
     const m = tmp(), r = tmp();
@@ -1681,18 +1716,24 @@ function jitCompile(parms, body) {
     patVars(pat.d, out);
   };
   const patCheck = (pat, path, checks, assigns, names) => {
-    if (isVarSym(pat)) { assigns.push(`${names.get(pat)} = ${path}`); return; }
+    if (isVarSym(pat)) {
+      assigns.push(CELLS ? `${names.get(pat)} = new R.Pair(${k(pat)}, ${path}), $env = new R.Pair(${names.get(pat)}, $env)` : `${names.get(pat)} = ${path}`);
+      return;
+    }
     if (pat === NIL) { checks.push(`${path} === R.NIL`); return; }
     checks.push(`${path} instanceof R.Pair`);
     patCheck(pat.a, `${path}.a`, checks, assigns, names);
     patCheck(pat.d, `${path}.d`, checks, assigns, names);
   };
+  const bindOne = (s, n, valExpr) => CELLS
+    ? `(${n} = new R.Pair(${k(s)}, ${valExpr}), $env = new R.Pair(${n}, $env))`
+    : `(${n} = ${valExpr})`;
   // returns [expr that binds, newScope]
   const bindPattern = (pat, valExpr, scope) => {
     if (isVarSym(pat)) {
       varSyms.add(pat);
       const n = fresh(pat);
-      return [`(${n} = ${valExpr})`, scope.concat([[pat, n]])];
+      return [bindOne(pat, n, valExpr), scope.concat([[pat, n]])];
     }
     const vars = [];
     patVars(pat, vars);
@@ -1702,6 +1743,10 @@ function jitCompile(parms, body) {
     const p = tmp();
     const checks = [], assigns = [];
     patCheck(pat, p, checks, assigns, names);
+    if (CELLS) {
+      const slow = vars.map((s) => `${names.get(s)} = R.cellIn($env, ${k(s)})`).join(', ');
+      return [`(${p} = ${valExpr}, (${checks.join(' && ') || 'true'}) ? (${assigns.join(', ') || '0'}) : ($env = R.destr2(${k(pat)}, ${p}, $env)${slow ? ', ' + slow : ''}), 0)`, newScope];
+    }
     const e2 = tmp();
     const slow = vars.map((s) => `${names.get(s)} = R.eg(${e2}, ${k(s)})`).join(', ');
     return [`(${p} = ${valExpr}, (${checks.join(' && ') || 'true'}) ? (${assigns.join(', ') || '0'}) : (${e2} = R.destr(${k(pat)}, ${p})${slow ? ', ' + slow : ''}), 0)`, newScope];
@@ -1716,6 +1761,14 @@ function jitCompile(parms, body) {
     }
     if (pp instanceof Pair && pp.a === O) reject('optional inside pattern');
     return bindPattern(pp, valExpr, scope);
+  };
+
+  // In cells mode an expression that binds variables restores the environment
+  // afterwards, so later closures don't capture bindings that are out of scope.
+  const scoped = (inner) => {
+    if (!CELLS) return `(${inner})`;
+    const sv = tmp(), r = tmp();
+    return `(${sv} = $env, ${r} = (${inner}), $env = ${sv}, ${r})`;
   };
 
   const seqExpr = (forms, scope) => {
@@ -1794,7 +1847,17 @@ function jitCompile(parms, body) {
       if (sf >= SF_FN) {
         if (!coreOk(op)) reject('core macro redefined or shadowed');
         switch (sf) {
-          case SF_FN: case SF_RFN: case SF_DEF: case SF_MAC: reject('creates a closure');
+          case SF_FN:
+            if (!CELLS) reject('creates a closure');
+            for (const [s2] of scope) varSyms.add(s2);
+            return `R.mkclo($env, ${k(e.d.a)}, ${k(fnBody(e))})`;
+          case SF_RFN:
+            if (!CELLS) reject('creates a closure');
+            for (const [s2] of scope) varSyms.add(s2);
+            return `R.mkrfn($env, ${k(e.d.a)}, ${k(e.d.d.a)}, ${k(fnBody(e.d))})`;
+          case SF_DEF: case SF_MAC:
+            if (!CELLS) reject('creates a closure');
+            return fallback(e, scope);
           case SF_DO: return seqExpr(e.d, scope);
           case SF_SET: {
             const xs = listToArr(e.d);
@@ -1809,7 +1872,7 @@ function jitCompile(parms, body) {
           }
           case SF_LET: {
             const [b, sc] = bindPattern(e.d.a, E(e.d.d.a, scope), scope);
-            return `(${b}, ${seqExpr(e.d.d.d, sc)})`;
+            return scoped(`${b}, ${seqExpr(e.d.d.d, sc)}`);
           }
           case SF_WITH: case SF_WITHS: {
             const xs = listToArr(e.d.a);
@@ -1823,7 +1886,7 @@ function jitCompile(parms, body) {
               for (let i = 0; i < xs.length; i += 2) { const [b, s2] = bindPattern(xs[i], E(xs[i + 1] === undefined ? NIL : xs[i + 1], sc), sc); parts.push(b); sc = s2; }
             }
             parts.push(seqExpr(e.d.d, sc));
-            return `(${parts.join(', ')})`;
+            return scoped(parts.join(', '));
           }
           case SF_WHEN: case SF_UNLESS:
             return `(${E(e.d.a, scope)} ${sf === SF_WHEN ? '!==' : '==='} R.NIL ? ${seqExpr(e.d.d, scope)} : R.NIL)`;
@@ -1877,7 +1940,7 @@ function jitCompile(parms, body) {
       else if (isVarSym(p)) { const [b, s2] = bindPattern(p, `R.rest([${vals.slice(i).map((v) => v[0]).join(', ')}], 0)`, sc); parts.push(b); sc = s2; }
       else reject('direct lambda parameters');
       parts.push(seqExpr(fnBodyList(op), sc));
-      return `(${parts.join(', ')})`;
+      return scoped(parts.join(', '));
     }
     return callExpr(e, scope, false);
   };
@@ -1946,6 +2009,12 @@ function jitCompile(parms, body) {
     if (!simpleParams) return null;
     if (restName === null && ats.length !== paramNames.length) return null;
     if (restName !== null && ats.length < paramNames.length) return null;
+    if (CELLS) {
+      const parts = ['$env = clo.d.d.a; $ee = R.ee;'];
+      paramNames.forEach((n, i) => parts.push(`${n} = new R.Pair(${k(params[i])}, ${ats[i]}); $env = new R.Pair(${n}, $env);`));
+      if (restName !== null) parts.push(`${restName} = new R.Pair(${k(restSym)}, R.rest([${ats.slice(paramNames.length).join(', ')}], 0)); $env = new R.Pair(${restName}, $env);`);
+      return parts.join(' ');
+    }
     const parts = paramNames.map((n, i) => `${n} = ${ats[i]};`);
     if (restName !== null) parts.push(`${restName} = R.rest([${ats.slice(paramNames.length).join(', ')}], 0);`);
     return parts.join(' ');
@@ -1966,6 +2035,10 @@ function jitCompile(parms, body) {
     varSyms.add(v);
     const n = fresh(v);
     const sc = scope.concat([[v, n]]);
+    if (CELLS) {
+      const outer = tmp();
+      return `${i} = ${E(e.d.d.a, scope)}; ${mx} = ${E(e.d.d.d.a, scope)}; ${outer} = $env; while (typeof ${mx} === 'number' && typeof ${i} === 'number' ? ${i} <= ${mx} : !R.less(${mx}, ${i})) { ${n} = new R.Pair(${k(v)}, ${i}); $env = new R.Pair(${n}, ${outer}); ${listToArr(e.d.d.d.d).map((x) => E(x, sc) + ';').join(' ')} ${i} = R.num(R.ee === $ee ? ${n}.d : R.lk($env, ${k(v)})) + 1; } $env = ${outer};`;
+    }
     return `${i} = ${E(e.d.d.a, scope)}; ${mx} = ${E(e.d.d.d.a, scope)}; while (typeof ${mx} === 'number' && typeof ${i} === 'number' ? ${i} <= ${mx} : !R.less(${mx}, ${i})) { ${n} = ${i}; ${listToArr(e.d.d.d.d).map((x) => E(x, sc) + ';').join(' ')} ${i} = R.num(${n}) + 1; }`;
   };
 
@@ -2083,7 +2156,7 @@ function jitCompile(parms, body) {
     if (restSym) {
       varSyms.add(restSym);
       restName = fresh(restSym);
-      lines.push(`${restName} = R.rest(args, ${params.length});`);
+      lines.push(bindOne(restSym, restName, `R.rest(args, ${params.length})`) + ';');
       sc = sc.concat([[restSym, restName]]);
     }
     prologue = lines.join(' ');
@@ -2098,9 +2171,10 @@ return function belCompiled(clo, args) {
   ${simpleParams
     ? `if (args.length ${restName !== null ? '<' : '!=='} ${paramNames.length}) return R.slow(clo, args);`
     : `if (args.length < ${minArgs}${restSym ? '' : ` || args.length > ${maxArgs}`}) return R.slow(clo, args);`}
-  let ${(simpleParams ? paramNames.map((n, i) => `${n} = args[${i}]`).concat(restName !== null ? [`${restName} = R.rest(args, ${paramNames.length})`] : []) : []).concat(['$fc = null', '$head = null', '$last = null']).join(', ')};
-  ${hoisted.filter((n) => !(simpleParams && (paramNames.includes(n) || n === restName))).length ? 'let ' + hoisted.filter((n) => !(simpleParams && (paramNames.includes(n) || n === restName))).join(', ') + ';' : ''}
+  let ${(simpleParams && !CELLS ? paramNames.map((n, i) => `${n} = args[${i}]`).concat(restName !== null ? [`${restName} = R.rest(args, ${paramNames.length})`] : []) : []).concat(['$fc = null', '$head = null', '$last = null', '$env = clo.d.d.a', '$ee = R.ee']).join(', ')};
+  ${hoisted.filter((n) => !(simpleParams && !CELLS && (paramNames.includes(n) || n === restName))).length ? 'let ' + hoisted.filter((n) => !(simpleParams && !CELLS && (paramNames.includes(n) || n === restName))).join(', ') + ';' : ''}
   const $fin = (x) => ($last === null ? x : ($last.d = x, $head));
+  ${simpleParams && CELLS ? paramNames.map((n, i) => `${n} = new R.Pair(${k(params[i])}, args[${i}]); $env = new R.Pair(${n}, $env);`).join(' ') + (restName !== null ? ` ${restName} = new R.Pair(${k(restSym)}, R.rest(args, ${paramNames.length})); $env = new R.Pair(${restName}, $env);` : '') : ''}
   ${prologue}
   for (;;) {
     ${tailCode}
