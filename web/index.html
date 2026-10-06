@@ -23,6 +23,8 @@
   #bar { width: min(96vw, calc((100vh - 120px) * 4 / 3)); display: flex; justify-content: space-between; gap: 12px; color: var(--dim); }
   #bar span b { color: var(--fg); font-weight: 600; }
   #fps b { color: var(--red); }
+  #detail { color: var(--dim); text-decoration: none; border-bottom: 1px dotted #444; }
+  #detail:hover { color: var(--red); }
   .keys { color: var(--dim); font-size: 12px; text-align: center; }
   .src { color: var(--dim); font-size: 11px; }
   .src a { color: var(--dim); text-decoration: none; border-bottom: 1px dotted #444; }
@@ -42,6 +44,7 @@
     <span id="tic">tic <b>-</b> &middot; <b>-</b> ms/frame in Bel</span>
     <span id="snd">sound <b>loading</b> (M)</span>
     <span id="held">keys <b>-</b></span>
+    <a id="detail" href="?hires=1">high detail (320x200)</a>
   </div>
   <div class="keys">
     <kbd>W A S D</kbd>/<kbd>arrows</kbd> move &middot; <kbd>Q</kbd><kbd>E</kbd>/<kbd>Alt+&larr;&rarr;</kbd> strafe &middot;

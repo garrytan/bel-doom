@@ -1,7 +1,7 @@
 // Runs the Bel interpreter and the Bel Doom engine off the main thread.
-// main -> worker: {type:'start', wad}, {type:'keys', keys}, {type:'pause', paused}
+// main -> worker: {type:'start', wad, hires, paused}, {type:'keys', keys}, {type:'pause', paused}
 // worker -> main: {type:'status', text}, {type:'log', text}, {type:'init', w, h, palette, ms},
-//                 {type:'frame', frame, ms, tic}, {type:'error', text}
+//                 {type:'frame', frame, ms, tic, sounds, keys}, {type:'error', text}
 import { bootEngine, TIC_RATE } from './protocol.js';
 
 const ROOT = new URL('../', import.meta.url);
@@ -29,16 +29,16 @@ function readFile(path) {
 
 self.onmessage = (e) => {
   const m = e.data;
-  if (m.type === 'keys') { keys = m.keys; tapped += m.keys; }
+  if (m.type === 'keys') { for (const c of m.keys) if (!keys.includes(c)) tapped += c; keys = m.keys; }
   else if (m.type === 'pause') paused = m.paused;
-  else if (m.type === 'start') start(m.wad).catch(fail);
+  else if (m.type === 'start') { paused = !!m.paused; start(m).catch(fail); }
 };
 
-async function start(wad) {
+async function start({ wad, hires }) {
   post({ type: 'status', text: 'loading interpreter (interp/bel.js)' });
   const { Bel } = await import(new URL('interp/bel.js', ROOT).href);
   const eng = bootEngine({
-    Bel, readFile, wad,
+    Bel, readFile, wad, hires,
     status: (text) => post({ type: 'status', text }),
     log: (text) => { if (text) post({ type: 'log', text }); },
   });
@@ -47,9 +47,10 @@ async function start(wad) {
     try {
       if (paused) return setTimeout(step, 50);
       const t = performance.now();
-      const f = eng.frame([...'wsadqerfu'].filter((c) => keys.includes(c) || tapped.includes(c)).join(''));
+      const used = [...'wsadqerfu'].filter((c) => keys.includes(c) || tapped.includes(c)).join('');
       tapped = '';
-      post({ type: 'frame', ...f }, [f.frame.buffer]);
+      const f = eng.frame(used);
+      post({ type: 'frame', ...f, keys: used }, [f.frame.buffer]);
       setTimeout(step, Math.max(0, 1000 / TIC_RATE - (performance.now() - t)));
     } catch (err) { fail(err); }
   };

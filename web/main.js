@@ -119,7 +119,8 @@ worker.onmessage = (e) => {
     img32 = new Uint32Array(img.data.buffer);
     const [dw, dh] = displaySize(w, h, Math.max(1, Math.round(800 / w)));
     canvas.width = dw; canvas.height = dh;
-    setOverlay('LOADING', 'running the first tic (doom-frame)');
+    if (startPaused) { loading = false; paused = true; setOverlay('READY', 'press Esc to start'); }
+    else setOverlay('LOADING', 'running the first tic (doom-frame)');
     console.log(`[bel-doom] ready in ${(m.ms / 1000).toFixed(1)} s, screen ${w}x${h} -> ${dw}x${dh}`);
   } else if (m.type === 'frame') {
     if (loading) { loading = false; overlay.classList.add('hidden'); }
@@ -207,4 +208,10 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) relea
 addEventListener('beforeunload', (e) => { if (lastTic > 0) e.preventDefault(); });
 $('frame').addEventListener('dblclick', () => (document.fullscreenElement ? document.exitFullscreen() : $('frame').requestFullscreen()).catch(() => {}));
 
-worker.postMessage({ type: 'start', wad: params.get('wad') || 'wad/e1m1.wad' });
+const hires = params.get('hires') === '1';
+const startPaused = params.get('paused') === '1';
+const other = new URLSearchParams(params);
+if (hires) other.delete('hires'); else other.set('hires', '1');
+$('detail').href = `?${other}`.replace(/\?$/, location.pathname);
+$('detail').textContent = hires ? 'low detail (160x100)' : 'high detail (320x200)';
+worker.postMessage({ type: 'start', wad: params.get('wad') || 'wad/e1m1.wad', hires, paused: startPaused });

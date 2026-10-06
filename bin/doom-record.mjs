@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 // Headless recorder: runs the Bel Doom engine on a scripted key sequence and writes PNGs, MP4 and/or GIF.
 //   node bin/doom-record.mjs [--script "w:35 wd:20 f:5 -:10"] [--script-file F] [--frames N]
-//        [--out DIR] [--mp4 FILE] [--gif FILE] [--wav FILE] [--raw FILE|-] [--scale 4] [--gif-scale 2] [--fps 35]
+//        [--out DIR] [--mp4 FILE] [--gif FILE] [--wav FILE] [--raw FILE|-] [--scale S] [--gif-scale S] [--gif-fps F] [--fps 35] [--hires]
 //        [--sounds wad/sounds.wad] [--audio-rate 22050] [--no-audio] [--wad wad/e1m1.wad] [--root DIR] [--quiet]
 // A script is whitespace/comma separated KEYS:TICS steps (KEYS from "wsadqerfu", "-" or empty = none).
 // One tic = one doom-frame call = one output frame. --frames N truncates the script or pads it with idle tics.
+// --hires runs at 320x200. Default scales give 640x480 PNG/MP4 and a 320x240 GIF at either detail.
 // The engine's S<lump> sound events are mixed from sounds.wad into the MP4's AAC track (and --wav), at tic times.
+import './bigstack.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
@@ -14,13 +16,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const DEMO = '-:10 w:40 wd:12 w:30 wa:18 wr:25 f:8 -:8 f:8 u:2 s:12 e:16 q:16 d:30 wr:30 a:20 w:20';
-const opt = { root: path.resolve(here, '..'), wad: 'wad/e1m1.wad', script: null, frames: null, out: null, mp4: null, gif: null, raw: null, wav: null, sounds: 'wad/sounds.wad', audio: true, audioRate: 22050, scale: 4, gifScale: 2, fps: 35, quiet: false };
+const opt = { root: path.resolve(here, '..'), wad: 'wad/e1m1.wad', script: null, frames: null, out: null, mp4: null, gif: null, raw: null, wav: null, sounds: 'wad/sounds.wad', audio: true, audioRate: 22050, scale: null, gifScale: null, gifFps: null, fps: 35, quiet: false, hires: false };
 const argv = process.argv.slice(2);
 const usage = () => { console.error(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 9).join('\n').replace(/^\/\/ ?/gm, '')); process.exit(2); };
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i], v = () => { if (i + 1 >= argv.length) usage(); return argv[++i]; };
   if (a === '--root') opt.root = path.resolve(v());
   else if (a === '--wad') opt.wad = v();
+  else if (a === '--hires') opt.hires = true;
   else if (a === '--script') opt.script = v();
   else if (a === '--script-file') opt.script = fs.readFileSync(v(), 'utf8').replace(/#.*$/gm, '');
   else if (a === '--frames') opt.frames = Number(v());
@@ -34,6 +37,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--no-audio') opt.audio = false;
   else if (a === '--scale') opt.scale = Number(v());
   else if (a === '--gif-scale') opt.gifScale = Number(v());
+  else if (a === '--gif-fps') opt.gifFps = Number(v());
   else if (a === '--fps') opt.fps = Number(v());
   else if (a === '--quiet' || a === '-q') opt.quiet = true;
   else usage();
@@ -57,6 +61,7 @@ const eng = bootEngine({
   Bel,
   readFile,
   wad: opt.wad,
+  hires: opt.hires,
   status: (s) => say(`bel-doom: ${s}`),
   log: (s) => { if (s && !opt.quiet) process.stderr.write(s.replace(/^/gm, '  | ').replace(/  \| $/, '')); },
 });
@@ -71,6 +76,8 @@ if (opt.audio && (opt.mp4 || opt.wav)) {
 }
 const soundEvents = [];
 
+opt.scale ??= Math.max(1, Math.round(640 / w));
+opt.gifScale ??= Math.max(1, Math.round(320 / w));
 const even = (n) => Math.max(2, Math.round(n / 2) * 2);
 const [pw, ph] = displaySize(w, h, opt.scale);
 const [vw, vh] = [even(pw), even(ph)];
@@ -85,7 +92,7 @@ function ffmpeg(args, file) {
 const sinks = [];
 const videoFile = opt.mp4 && lumps ? `${opt.mp4}.video.mp4` : opt.mp4;
 if (opt.mp4) sinks.push(ffmpeg(['-vf', `scale=${vw}:${vh}:flags=neighbor`, '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-movflags', '+faststart'], videoFile));
-if (opt.gif) sinks.push(ffmpeg(['-vf', `scale=${gw}:${gh}:flags=neighbor,split[a][b];[a]palettegen=max_colors=256:stats_mode=full[p];[b][p]paletteuse=dither=none`, '-loop', '0'], opt.gif));
+if (opt.gif) sinks.push(ffmpeg(['-vf', `${opt.gifFps ? `fps=${opt.gifFps},` : ''}scale=${gw}:${gh}:flags=neighbor,split[a][b];[a]palettegen=max_colors=256:stats_mode=full[p];[b][p]paletteuse=dither=none:diff_mode=rectangle`, '-loop', '0'], opt.gif));
 const rawOut = opt.raw === '-' ? process.stdout : opt.raw ? fs.createWriteStream(opt.raw) : null;
 if (opt.out) fs.mkdirSync(opt.out, { recursive: true });
 

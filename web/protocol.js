@@ -65,16 +65,31 @@ export function loadSounds(wadBytes) {
   return sounds;
 }
 
+// Required parameters of a Bel closure (lit clo env parms body); (o x) optionals and a rest tail don't count.
+// The functional engine's (doom-frame world keys) takes the world doom-init returned and returns the next one.
+function requiredParams(bel, f) {
+  const pair = (x) => x !== null && typeof x === 'object' && 'a' in x && 'd' in x;
+  if (!pair(f)) return 0;
+  let p = f;
+  for (let i = 0; i < 3 && pair(p); i++) p = p.d;
+  if (!pair(p)) return 0;
+  let n = 0;
+  for (let q = p.a; pair(q); q = q.d) if (!(pair(q.a) && q.a.a === bel.sym('o'))) n++;
+  return n;
+}
+
 // Boots the interpreter and engine; returns the screen size, palette and a frame(keys) stepper.
-export function bootEngine({ Bel, readFile, wad = 'wad/e1m1.wad', status = () => {}, log = () => {} }) {
+export function bootEngine({ Bel, readFile, wad = 'wad/e1m1.wad', hires = false, status = () => {}, log = () => {} }) {
   const t0 = performance.now();
   status('booting Bel (evaluating bel.bel)');
   const bel = new Bel({ readFile });
   status('loading doom/main.bel');
   bel.loadFile('doom/main.bel');
+  if (hires) bel.evalString('(set-resolution 320 200)');
   log(latin1(bel.takeOutput()));
   status(`doom-init: loading and parsing ${wad}`);
-  bel.call('doom-init', wad);
+  const functional = requiredParams(bel, bel.global('doom-frame')) >= 2;
+  let world = bel.call('doom-init', wad);
   const init = splitPacket(bel.takeOutput(), 'P', 768);
   log(init.text);
   if (!init.data) throw new Error('doom-init wrote no P (palette) packet');
@@ -83,10 +98,11 @@ export function bootEngine({ Bel, readFile, wad = 'wad/e1m1.wad', status = () =>
   const n = w * h;
   let tic = 0;
   return {
-    bel, w, h, palette: init.data, initMs: performance.now() - t0,
+    bel, w, h, palette: init.data, initMs: performance.now() - t0, functional,
     frame(keys) {
       const t = performance.now();
-      bel.call('doom-frame', keys);
+      if (functional) world = bel.call('doom-frame', world, keys);
+      else bel.call('doom-frame', keys);
       const out = bel.takeOutput();
       const ms = performance.now() - t;
       const f = splitPacket(out, 'F', n);

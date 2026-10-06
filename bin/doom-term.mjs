@@ -1,26 +1,28 @@
 #!/usr/bin/env node
 // Terminal Doom player: runs the Bel engine in Node and draws truecolor half-block frames.
-// Usage: node bin/doom-term.mjs [--wad wad/e1m1.wad] [--root DIR] [--frames N] [--keys KEYS] [--hold MS] [--first-hold MS] [--bell]
+// Usage: node bin/doom-term.mjs [--hires] [--wad wad/e1m1.wad] [--root DIR] [--frames N] [--keys KEYS] [--hold MS] [--first-hold MS] [--bell]
 // Sound events are ignored, or ring the terminal bell with --bell.
 // Keys: WASD/arrows move, Q/E or Alt+left/right strafe, F fire, Space/U use, R toggles run
 // (Shift+letter/arrow also runs), Esc or Ctrl-C quits.
+import './bigstack.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const opt = { root: path.resolve(here, '..'), wad: 'wad/e1m1.wad', frames: Infinity, keys: null, hold: 150, firstHold: 400, bell: false };
+const opt = { root: path.resolve(here, '..'), wad: 'wad/e1m1.wad', frames: Infinity, keys: null, hold: 150, firstHold: 400, bell: false, hires: false };
 const argv = process.argv.slice(2);
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i], v = () => argv[++i];
   if (a === '--root') opt.root = path.resolve(v());
   else if (a === '--wad') opt.wad = v();
+  else if (a === '--hires') opt.hires = true;
   else if (a === '--frames') opt.frames = Number(v());
   else if (a === '--keys') opt.keys = v();
   else if (a === '--hold') opt.hold = Number(v());
   else if (a === '--first-hold') opt.firstHold = Number(v());
   else if (a === '--bell') opt.bell = true;
-  else { console.error('usage: node bin/doom-term.mjs [--wad PATH] [--root DIR] [--frames N] [--keys KEYS] [--hold MS] [--first-hold MS] [--bell]'); process.exit(2); }
+  else { console.error('usage: node bin/doom-term.mjs [--hires] [--wad PATH] [--root DIR] [--frames N] [--keys KEYS] [--hold MS] [--first-hold MS] [--bell]'); process.exit(2); }
 }
 
 const { bootEngine, paletteRGBA32, columnsToRows, scaleIndexed, TIC_RATE } = await import(pathToFileURL(path.join(here, '../web/protocol.js')).href);
@@ -33,6 +35,7 @@ const eng = bootEngine({
   Bel,
   readFile: (p) => { const f = path.join(opt.root, p); return fs.existsSync(f) ? new Uint8Array(fs.readFileSync(f)) : null; },
   wad: opt.wad,
+  hires: opt.hires,
   status: (s) => process.stderr.write(`bel-doom: ${s}\n`),
   log: (s) => { if (s) { for (const l of s.split('\n')) if (l.trim()) logs.push(l); while (logs.length > 50) logs.shift(); } },
 });
