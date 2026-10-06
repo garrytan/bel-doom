@@ -709,6 +709,7 @@ function ev(e, a, w) {
         exp = mc.exp;
       } else {
         exp = applyF(f.d.d.a, listToArr(e.d));
+        markCodeTree(e);
         e.x = new MacroCache(f, exp);
       }
       e = exp;
@@ -997,7 +998,7 @@ function comp(e) {
   const ph = (a) => ev(e, a, 0);  // placeholder while compiling
   ph.ep = CODE_EPOCH;
   e.c = ph;
-  for (let p = e; p instanceof Pair && !codePairs.has(p); p = p.d) codePairs.add(p);
+  markCodeTree(e);
   const n = compPair(e);
   n.ep = CODE_EPOCH;
   e.c = n;
@@ -1081,6 +1082,7 @@ function expandCached(e, f) {
   const mc = e.x;
   if (mc instanceof MacroCache && mc.m === f && mc.ep === CODE_EPOCH) return mc.exp;
   const exp = applyF(f.d.d.a, listToArr(e.d));
+  markCodeTree(e);
   e.x = new MacroCache(f, exp);
   return exp;
 }
@@ -1385,6 +1387,18 @@ function compCore(e, sf) {
 
 const JIT_THRESHOLD = 16;
 const codePairs = new WeakSet();
+// Marks every pair of a piece of code (not inside quote) so that changing it
+// in place invalidates compiled nodes, macro expansions and compiled bodies.
+// A marked pair always has its whole subtree marked, so marking stops early.
+function markCodeTree(e) {
+  let p = e;
+  while (p instanceof Pair && !codePairs.has(p)) {
+    codePairs.add(p);
+    if (p.a instanceof Pair && p.a.a !== QUOTE) markCodeTree(p.a);
+    p = p.d;
+  }
+}
+
 function noteMutation(p) {
   ENV_EPOCH++;
   R.ee = ENV_EPOCH;
@@ -1430,6 +1444,7 @@ function jitOf(f) {
     }
     cc.ep = ENV_EPOCH;
     cc.cells = null;
+    cc.free = null;
   }
   if (je.code === null) {
     if (++je.calls < JIT_THRESHOLD) return null;
@@ -1577,6 +1592,7 @@ const R = {
   less(a, b) { return less(a, b); },
   mistype() { return sigerr(sym('mistype')); },
   num(x) { return num(x); },
+  nth,
   mod(x, y) {
     if (y !== 0 && Number.isInteger(x) && Number.isInteger(y)) return ((x % y) + y) % y;
     return null;
@@ -1616,14 +1632,8 @@ function jitCompile(parms, body, CELLS) {
     return null;
   };
 
-  const markCode = (e) => {
-    let p = e;
-    while (p instanceof Pair && !codePairs.has(p)) {
-      codePairs.add(p);
-      if (p.a instanceof Pair && p.a.a !== QUOTE) markCode(p.a);
-      p = p.d;
-    }
-  };
+  const markCode = markCodeTree;
+  markCode(parms);
   markCode(body);
 
   // Parameters. Simple ones (plain symbols, optional rest) bind straight from
@@ -1802,11 +1812,13 @@ function jitCompile(parms, body, CELLS) {
   // inline jets: name -> [arity, (f, args) => expr]
   const NUM2 = (op) => (f, a) => `(typeof ${a[0]} === 'number' && typeof ${a[1]} === 'number' ? ${a[0]} ${op} ${a[1]} : ${f}.x([${a[0]}, ${a[1]}]))`;
   const CMP2 = (op) => (f, a) => `(typeof ${a[0]} === 'number' && typeof ${a[1]} === 'number' ? (${a[0]} ${op} ${a[1]} ? R.T : R.NIL) : ${f}.x([${a[0]}, ${a[1]}]))`;
+  const NUMN = (op) => (f, a) => `(${a.map((x) => `typeof ${x} === 'number'`).join(' && ')} ? ${op === '+' ? '0 + ' : ''}${a.join(` ${op} `)} : ${f}.x([${a.join(', ')}]))`;
   const INLINE = {
-    '+': [2, NUM2('+')], '*': [2, NUM2('*')],
-    '-': [[1, 2], (f, a) => a.length === 1
+    '+': [[2, 3, 4], NUMN('+')], '*': [[2, 3, 4], NUMN('*')],
+    '-': [[1, 2, 3, 4], (f, a) => a.length === 1
       ? `(typeof ${a[0]} === 'number' ? -${a[0]} : ${f}.x([${a[0]}]))`
-      : NUM2('-')(f, a)],
+      : NUMN('-')(f, a)],
+    'nth': [2, (f, a) => `(typeof ${a[0]} === 'number' ? R.nth(${a[0]}, ${a[1]}) : ${f}.x([${a[0]}, ${a[1]}]))`],
     '/': [2, (f, a) => `(typeof ${a[0]} === 'number' && typeof ${a[1]} === 'number' && ${a[1]} !== 0 ? ${a[0]} / ${a[1]} : ${f}.x([${a[0]}, ${a[1]}]))`],
     '<': [2, CMP2('<')], '>': [2, CMP2('>')], '<=': [2, CMP2('<=')], '>=': [2, CMP2('>=')],
     '=': [2, (f, a) => `(${a[0]} === ${a[1]} ? R.T : ${f}.x([${a[0]}, ${a[1]}]))`],
@@ -1988,9 +2000,11 @@ function jitCompile(parms, body, CELLS) {
     if (info.global) funSyms.add(info.global);
     const ats = args.map(() => tmp());
     const evalArgs = args.map((x, i) => `${ats[i]} = ${E(x, scope)}`);
-    // inline jet
-    if (info.global) {
-      const g = info.global;
+    // inline jet (the identity guard decides at run time, so a free name that is
+    // also bound lexically elsewhere can inline too)
+    const inl = info.global || (op instanceof Sym && !op.lit && lookupLocal(scope, op) === null && !isUvar(op) ? op : null);
+    if (inl) {
+      const g = inl;
       const jetName = g.name;
       const spec = INLINE[jetName];
       const cur = g.gcell ? g.gcell.d : null;
@@ -2671,8 +2685,10 @@ function equal(x, y) {
 }
 
 function num(x) {
-  if (typeof x !== 'number') sigerr(sym('mistype'));
-  return x;
+  if (typeof x === 'number') return x;
+  const v = sigerr(sym('mistype'));
+  if (typeof v === 'number') return v;
+  throw new BelError(sym('mistype'), 'Bel error: mistype (an err handler returned a non-number to arithmetic)');
 }
 
 function less(x, y) {
