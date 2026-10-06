@@ -229,11 +229,18 @@ function isLiteral(e) {
 
 // ---------------------------------------------------------------- errors
 
+let errContext = null;   // parameter list being bound, for error messages only
+
 function sigerr(msg) {
   for (let i = dyn.length - 1; i >= 0; i--) {
     if (dyn[i].a === ERR) return applyF(dyn[i].d, [msg]);
   }
-  throw new BelError(msg, 'Bel error: ' + printString(msg));
+  let text = 'Bel error: ' + printString(msg);
+  if (errContext !== null && (msg === sym('underargs') || msg === sym('overargs') || msg === sym('atom-arg') || msg === sym('mistype'))) {
+    text += ' (binding parameters ' + printString(errContext) + ')';
+  }
+  errContext = null;
+  throw new BelError(msg, text);
 }
 
 // ---------------------------------------------------------------- lookup
@@ -290,21 +297,27 @@ function bind(parms, args, env) {
   while (p instanceof Pair) {
     const v = p.a;
     if (i >= n || !(v instanceof Sym) || v.lit) {
-      return pass(parms, arrToList(args), env0);
+      errContext = parms;
+      const r = pass(parms, arrToList(args), env0);
+      errContext = null;
+      return r;
     }
     v.lexb = true;
     env = new Pair(new Pair(v, args[i++]), env);
     p = p.d;
   }
   if (p === NIL) {
-    if (i < n) return sigerr(sym('overargs'));
+    if (i < n) { errContext = parms; return sigerr(sym('overargs')); }
     return env;
   }
   if (p instanceof Sym && !p.lit) {
     p.lexb = true;
     return new Pair(new Pair(p, arrToList(args, i)), env);
   }
-  return pass(parms, arrToList(args), env);
+  errContext = parms;
+  const r = pass(parms, arrToList(args), env0);
+  errContext = null;
+  return r;
 }
 
 function pass(pat, arg, env) {
