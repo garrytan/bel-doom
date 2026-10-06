@@ -1,5 +1,6 @@
 import { displaySize, paletteRGBA32, loadSounds, parseRes, TIC_RATE } from './protocol.js';
 import { createPool, autoWorkers } from './pool.js';
+import { createTouchControls } from './touch.js';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('screen');
@@ -16,6 +17,17 @@ const ticTimes = [];
 const stats = [];
 let lastTic = 0, dropped = 0, split = false, debug = false, poolInfo = [], notes = [];
 
+// Touch controls: on for touch-first devices, or from the first touch on hybrids; ?touch=1 or 0 forces.
+let touch = null, touchKeys = '';
+function enableTouch() {
+  if (touch) return;
+  document.body.classList.add('touch');
+  document.addEventListener('gesturestart', (e) => e.preventDefault());
+  touch = createTouchControls($('touch'), (k) => { touchKeys = k; syncKeys(); });
+}
+if (params.get('touch') === '1' || (params.get('touch') !== '0' && matchMedia('(pointer: coarse)').matches)) enableTouch();
+else if (params.get('touch') !== '0') addEventListener('touchstart', enableTouch, { once: true, passive: true });
+
 const sound = { lumps: null, ctx: null, gain: null, buffers: new Map(), voices: [], missing: new Set(),
   muted: localStorage.getItem('beldoom-muted') === '1', error: null };
 fetch(new URL('../wad/sounds.wad', import.meta.url))
@@ -26,8 +38,8 @@ fetch(new URL('../wad/sounds.wad', import.meta.url))
 
 function soundLabel() {
   const state = sound.error ? 'unavailable' : !sound.lumps ? 'loading' : sound.muted ? 'muted' :
-    sound.ctx && sound.ctx.state === 'running' ? 'on' : 'press a key';
-  $('snd').innerHTML = `sound <b>${state}</b> (M)`;
+    sound.ctx && sound.ctx.state === 'running' ? 'on' : touch ? 'tap here' : 'press a key';
+  $('snd').innerHTML = `sound <b>${state}</b>${touch ? '' : ' (M)'}`;
 }
 
 function unlockAudio() {
@@ -84,6 +96,8 @@ function toggleMute() {
   soundLabel();
 }
 
+function running() { document.body.classList.toggle('running', !loading && !paused); }
+
 function setOverlay(big, text, isError) {
   overlay.classList.remove('hidden');
   overlay.innerHTML = '';
@@ -94,6 +108,8 @@ function setOverlay(big, text, isError) {
 
 function fail(text) {
   loading = false;
+  paused = true;
+  running();
   setOverlay('ERROR', text, true);
   console.error(text);
 }
@@ -139,14 +155,14 @@ function onInit(m) {
   img32 = new Uint32Array(img.data.buffer);
   const [dw, dh] = displaySize(w, h, Math.max(1, Math.round(800 / w)));
   canvas.width = dw; canvas.height = dh;
-  if (startPaused) { loading = false; paused = true; setOverlay('READY', 'press Esc to start'); }
+  if (startPaused) { loading = false; paused = true; setOverlay('READY', touch ? 'tap to start' : 'press Esc to start'); }
   else setOverlay('LOADING', 'running the first tic');
   console.log(`[bel-doom] ready in ${(m.ms / 1000).toFixed(1)} s, screen ${w}x${h} -> ${dw}x${dh}, ${m.workers} worker(s)`);
   dispatchEvent(new CustomEvent('beldoom-init', { detail: { w, h, workers: m.workers, split: m.split, sliceApi: m.sliceApi } }));
 }
 
 function onFrame(m) {
-  if (loading) { loading = false; overlay.classList.add('hidden'); }
+  if (loading) { loading = false; overlay.classList.add('hidden'); running(); }
   latest = m.frame; lastTic = m.tic; dropped = m.dropped; poolInfo = m.workers;
   playSounds(m.sounds);
   ticTimes.push([performance.now(), m.tic]);
@@ -193,6 +209,7 @@ function keyString() {
       case 'Space': case 'KeyU': s.add('u'); break;
     }
   }
+  for (const c of touchKeys) s.add(c);
   return [...ORDER].filter((c) => s.has(c)).join('');
 }
 
@@ -207,18 +224,25 @@ function syncKeys() {
   $('held').innerHTML = `keys <b>${k || '-'}</b>`;
 }
 
+function toggleDebug() { debug = !debug; $('debug').classList.toggle('hidden', !debug); }
+
+function togglePause() {
+  if (loading || !src) return;
+  paused = !paused;
+  pool.pause(paused || document.hidden);
+  if (paused) { touch?.reset(); setOverlay('PAUSED', touch ? 'tap to resume' : 'press Esc to resume'); }
+  else overlay.classList.add('hidden');
+  running();
+  sentKeys = null; syncKeys();
+}
+
 addEventListener('pointerdown', unlockAudio);
+addEventListener('touchend', unlockAudio);
 addEventListener('keydown', (e) => {
   unlockAudio();
   if (e.code === 'KeyM' && !e.repeat) { toggleMute(); return; }
-  if (e.code === 'Backquote' && !e.repeat) { debug = !debug; $('debug').classList.toggle('hidden', !debug); return; }
-  if (e.code === 'Escape' && !loading && src) {
-    paused = !paused;
-    pool.pause(paused || document.hidden);
-    if (paused) setOverlay('PAUSED', 'press Esc to resume'); else overlay.classList.add('hidden');
-    sentKeys = null; syncKeys();
-    return;
-  }
+  if (e.code === 'Backquote' && !e.repeat) { toggleDebug(); return; }
+  if (e.code === 'Escape') { togglePause(); return; }
   if (!MAPPED.has(e.code)) return;
   e.preventDefault();
   held.add(e.code);
@@ -230,7 +254,7 @@ addEventListener('keyup', (e) => {
   held.delete(e.code);
   syncKeys();
 });
-const releaseAll = () => { held.clear(); syncKeys(); };
+const releaseAll = () => { held.clear(); touch?.reset(); syncKeys(); };
 addEventListener('blur', releaseAll);
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) releaseAll();
@@ -238,7 +262,24 @@ document.addEventListener('visibilitychange', () => {
 });
 
 addEventListener('beforeunload', (e) => { if (lastTic > 0) e.preventDefault(); });
-$('frame').addEventListener('dblclick', () => (document.fullscreenElement ? document.exitFullscreen() : $('frame').requestFullscreen()).catch(() => {}));
+$('frame').addEventListener('dblclick', () => {
+  if (touch) return;
+  (document.fullscreenElement ? document.exitFullscreen() : $('frame').requestFullscreen()).catch(() => {});
+});
+overlay.addEventListener('click', () => { if (touch && paused && src && !loading) togglePause(); });
+$('fps').addEventListener('click', toggleDebug);
+$('snd').addEventListener('click', () => {
+  if (sound.muted || (sound.ctx && sound.ctx.state === 'running')) toggleMute();
+  unlockAudio();
+});
+$('pausebtn').addEventListener('click', togglePause);
+const root = document.documentElement;
+const requestFullscreen = root.requestFullscreen || root.webkitRequestFullscreen;
+if (!requestFullscreen) $('fsbtn').style.display = 'none';
+$('fsbtn').addEventListener('click', () => {
+  if (document.fullscreenElement || document.webkitFullscreenElement) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+  else Promise.resolve(requestFullscreen.call(root)).then(() => screen.orientation?.lock?.('landscape')).catch(() => {});
+});
 
 const res = parseRes(params.get('res'));
 const hires = !res && params.get('hires') === '1';
@@ -254,7 +295,7 @@ for (const size of ['160x100', '320x200', '640x480']) {
 }
 const workersParam = params.get('workers');
 const pool = createPool({
-  count: Number(workersParam) > 0 ? Math.min(16, Number(workersParam)) : autoWorkers(),
+  count: Number(workersParam) > 0 ? Math.min(16, Number(workersParam)) : autoWorkers(res || (hires ? [320, 200] : [160, 100])),
   auto: !(Number(workersParam) > 0),
   start: { wad: params.get('wad') || 'wad/e1m1.wad', hires, res, tier: params.get('tier'), cutSlices: params.get('slices') === 'cut' },
   paused: startPaused,

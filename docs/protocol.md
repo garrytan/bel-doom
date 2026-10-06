@@ -107,13 +107,16 @@ If the last worker fails, the page shows the error.
 |---|---|
 | `?res=WxH` | screen size, passed to `doom-init` (e.g. `640x480`) |
 | `?hires=1` | 320x200 |
-| `?workers=N` | number of workers. The default is `min(cores - 2, 8, deviceMemory GB x 1024 x 0.6 / 600)`, or at most 2 when the browser does not report `deviceMemory`; it drops to one worker when the engine has no `doom-draw-slice` |
+| `?workers=N` | number of workers. The default is one per 40,000 pixels (1 at 160x100, 2 at 320x200, 8 at 640x480), capped at `cores - 2`, 8 and `deviceMemory GB x 1024 x 0.6 / 600` (2 when the browser does not report `deviceMemory`); it drops to one worker when the engine has no `doom-draw-slice` |
 | `?slices=cut` | ignore `doom-draw-slice` and cut slices out of full frames (for comparing) |
 | `?tier=ev\|closure\|js` | the highest execution tier the interpreter uses |
 | `?paused=1` | start paused (Esc starts the game) |
 | `?wad=PATH` | another level WAD |
+| `?touch=1\|0` | force the on-screen touch controls on or off (by default they appear on touch-first devices, or at the first touch) |
 
-The backtick key shows an overlay with fps, game speed, tics per frame, step, render, write, transfer and draw times, dropped tics, and each worker's times and columns.
+Touch controls (`web/touch.js`) produce the same key letters as the keyboard: a floating stick on the left half of the screen gives `w`/`s` and `a`/`d`, plus `r` when dragged past its ring while moving; the buttons give `f`, `u`, `q` and `e`. Each finger is tracked by its pointer id. The pause button and a tap on the pause overlay replace Esc.
+
+The backtick key (or tapping the fps readout) shows an overlay with fps, game speed, tics per frame, step, render, write, transfer and draw times, dropped tics, and each worker's times and columns.
 
 For tools driving the page, `window.belDoom.script(steps)` hands the clock a per-tic key script, `window.belDoom.workers` is the current worker count, and the page fires `beldoom-init` and `beldoom-frame` events (with the frame, its tic, tics per frame, timings and worker count). `window.belDoom.debug` injects faults for testing the fallback: `skewKeys(i)` gives worker `i` different keys for one frame, `silence(i)` stops it without telling the pool, and `extraTic(i)` makes it run an extra tic.
 
@@ -125,6 +128,7 @@ For tools driving the page, `window.belDoom.script(steps)` hands the clock a per
 
 ## Changelog
 
+- 2026-10-06: Touch controls for phones and tablets; `?touch`; the default worker count follows the screen size.
 - 2026-10-06: Render pool. The main thread owns the clock; workers replicate the simulation and draw column slices with `(doom-draw-slice w x0 x1)`; digests every 35 tics and fallback to one worker; `?workers` and `?slices`; `doom-live --workers/--slices/--checksums`.
 - 2026-10-06: The tic and the frame split into `doom-tick` and `doom-draw`, with a fixed 35 Hz clock and per-tic input and sound; `doom-init` takes a width and height.
 - 2026-10-06: Sound packets.
