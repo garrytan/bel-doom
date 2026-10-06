@@ -20,7 +20,7 @@ He meant it. In Bel, numbers are built from lists, and the integers in them are 
 
 So `(+ 2 2)` appends two lists of `t`. There is no floating point, no trig, no vector type (Bel's arrays are lists too), and no way to draw a pixel except writing bits to a stream.
 
-This repository runs Doom in it. It plays Freedoom's E1M1 with BSP rendering, textured walls, floors and sky, light levels, sprites, zombiemen, imps and demons that see you, chase you and shoot back, the pistol, exploding barrels, doors, lifts, pickups, the status bar with Doomguy's face, and sound. The game is 1,729 lines of Bel, running on Paul Graham's unmodified `bel.bel`. The Bel is purely functional: there is no assignment and there are no loops anywhere in the engine.
+This repository runs Doom in it. It plays Freedoom's E1M1 with BSP rendering, textured walls, floors and sky, light levels, sprites, zombiemen, imps and demons that see you, chase you and shoot back, the pistol, exploding barrels, doors, lifts, pickups, the status bar with Doomguy's face, and sound. The game is about 1,760 lines of Bel, running on Paul Graham's unmodified `bel.bel`. The Bel is purely functional: there is no assignment and there are no loops anywhere in the engine.
 
 ## Doom as a pure function
 
@@ -87,10 +87,10 @@ Even randomness is pure. Doom's `P_Random` reads from a fixed table of 256 bytes
 | [`main.bel`](doom/main.bel) | 108 | entry points, screen constants, building the world |
 | [`math.bel`](doom/math.bel) | 109 | sine, cosine, square root and arctangent from Taylor series and Newton's method, Doom's random table, property-list helpers |
 | [`wad.bel`](doom/wad.bel) | 170 | WAD directory, palette, COLORMAP, composing wall textures from TEXTURE1/PNAMES patches, flats, sprites |
-| [`level.bel`](doom/level.bel) | 164 | vertexes, linedefs, sidedefs, sectors, segs, subsectors, BSP nodes, a blockmap, line of sight |
+| [`level.bel`](doom/level.bel) | 168 | vertexes, linedefs, sidedefs, sectors, segs, subsectors, BSP nodes, a blockmap, line of sight |
 | [`render.bel`](doom/render.bel) | 502 | the BSP renderer: view transform, near-plane clipping, perspective-correct textures with pegging, floors and ceilings, sky, light diminishing, fences and grates, sprites with 8 rotations clipped against walls, the weapon, damage and pickup tints |
-| [`actors.bel`](doom/actors.bel) | 313 | zombieman, shotgun guy, imp and demon (sight, chase, attack, pain, death) and barrels with chain explosions |
-| [`game.bel`](doom/game.bel) | 356 | movement, collision and stepping, the pistol with autoaim, doors, lifts, switches, walk-over triggers, pickups, status bar and face, death and respawn |
+| [`actors.bel`](doom/actors.bel) | 324 | zombieman, shotgun guy, imp and demon (sight, chase, attack, pain, death) and barrels with chain explosions |
+| [`game.bel`](doom/game.bel) | 375 | movement, collision and stepping, the pistol with autoaim, doors, lifts, switches, walk-over triggers, pickups, status bar and face, death and respawn |
 
 Bel has no arrays, so everything is lists. The frame is a list of 160 columns of 100 palette indices (Doom draws walls in columns too). Textures are lists of circular column lists, so wrapping around a texture costs nothing.
 
@@ -139,7 +139,7 @@ The functional rewrite renders the same frames, byte for byte, as the imperative
 | Live in a browser (headless Chromium, 4-core VM, while screen-recording) | 23-26 frames a second at 160x100 |
 | Engine alone in Node | about 41 ms a frame at 160x100, 128 ms at 320x200 |
 | Startup (boot Bel, parse the WAD, compose textures) | about 3.5 s |
-| Engine | 1,729 lines of Bel (1,350 without comments and blank lines) |
+| Engine | 1,763 lines of Bel in 8 files (1,375 without comments and blank lines) |
 | Interpreter | about 2,400 lines of JavaScript, no dependencies |
 | Interpreter tests | 108/108, and 37/37 on `belexamples.txt` |
 
