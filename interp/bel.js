@@ -1533,6 +1533,7 @@ const R = {
     return NIL;
   },
   less(a, b) { return less(a, b); },
+  mistype() { return sigerr(sym('mistype')); },
   num(x) { return num(x); },
   mod(x, y) {
     if (y !== 0 && Number.isInteger(x) && Number.isInteger(y)) return ((x % y) + y) % y;
@@ -1582,13 +1583,16 @@ function jitCompile(parms, body) {
   };
   markCode(body);
 
-  // parameters: a proper list of plain symbols, optionally with a rest symbol
+  // Parameters. Simple ones (plain symbols, optional rest) bind straight from
+  // the argument array and allow self-call loops; optional (o x d), typed
+  // (t x f) and destructured parameters bind in the entry prologue.
   const params = [];
   let restSym = null;
+  let simpleParams = true;
   {
     let p = parms;
     while (p instanceof Pair) {
-      if (!isVarSym(p.a)) reject('complex parameters');
+      if (!isVarSym(p.a)) simpleParams = false;
       params.push(p.a);
       p = p.d;
     }
@@ -1598,10 +1602,15 @@ function jitCompile(parms, body) {
     }
   }
   const scope0 = [];
-  const paramNames = params.map((s) => { varSyms.add(s); const n = fresh(s); scope0.push([s, n]); return n; });
+  let paramNames = [];
   let restName = null;
-  if (restSym) { varSyms.add(restSym); restName = fresh(restSym); scope0.push([restSym, restName]); }
-
+  let prologue = '';
+  let minArgs = 0, maxArgs = params.length;
+  if (simpleParams) {
+    paramNames = params.map((s) => { varSyms.add(s); const n = fresh(s); scope0.push([s, n]); return n; });
+    minArgs = params.length;
+    if (restSym) { varSyms.add(restSym); restName = fresh(restSym); scope0.push([restSym, restName]); }
+  }
   const lit = (v) => {
     if (typeof v === 'number') return Number.isFinite(v) ? (Object.is(v, -0) ? '-0' : String(v)) : k(v);
     return k(v);
@@ -1696,6 +1705,17 @@ function jitCompile(parms, body) {
     const e2 = tmp();
     const slow = vars.map((s) => `${names.get(s)} = R.eg(${e2}, ${k(s)})`).join(', ');
     return [`(${p} = ${valExpr}, (${checks.join(' && ') || 'true'}) ? (${assigns.join(', ') || '0'}) : (${e2} = R.destr(${k(pat)}, ${p})${slow ? ', ' + slow : ''}), 0)`, newScope];
+  };
+
+  const bindParam = (pp, valExpr, scope) => {
+    if (pp instanceof Pair && pp.a === T) {
+      const v = pp.d.a, f = pp.d.d.a;
+      const t = tmp();
+      const [b, s2] = bindParam(v, t, scope);
+      return [`${t} = ${valExpr}, (R.call(${E(f, scope)}, [${t}]) === R.NIL ? R.mistype() : 0), ${b}`, s2];
+    }
+    if (pp instanceof Pair && pp.a === O) reject('optional inside pattern');
+    return bindPattern(pp, valExpr, scope);
   };
 
   const seqExpr = (forms, scope) => {
@@ -1923,6 +1943,7 @@ function jitCompile(parms, body) {
 
   // assignment of new argument values to the parameters, or null if the arity can't match
   const selfAssign = (ats) => {
+    if (!simpleParams) return null;
     if (restName === null && ats.length !== paramNames.length) return null;
     if (restName !== null && ats.length < paramNames.length) return null;
     const parts = paramNames.map((n, i) => `${n} = ${ats[i]};`);
@@ -2039,15 +2060,48 @@ function jitCompile(parms, body) {
     return callExpr(e, scope, true);
   };
 
+  if (!simpleParams) {
+    // bind each parameter in order; defaults and type checks see earlier ones
+    let sc = scope0.slice();
+    const lines = [];
+    params.forEach((pp, i) => {
+      if (pp instanceof Pair && pp.a === O) {
+        const v = pp.d instanceof Pair ? pp.d.a : NIL;
+        const dexp = pp.d instanceof Pair && pp.d.d instanceof Pair ? pp.d.d.a : NIL;
+        const t = tmp();
+        lines.push(`${t} = args.length > ${i} ? args[${i}] : ${E(dexp, sc)};`);
+        const [b, s2] = bindParam(v, t, sc);
+        lines.push(b + ';');
+        sc = s2;
+      } else {
+        minArgs = i + 1;
+        const [b, s2] = bindParam(pp, `args[${i}]`, sc);
+        lines.push(b + ';');
+        sc = s2;
+      }
+    });
+    if (restSym) {
+      varSyms.add(restSym);
+      restName = fresh(restSym);
+      lines.push(`${restName} = R.rest(args, ${params.length});`);
+      sc = sc.concat([[restSym, restName]]);
+    }
+    prologue = lines.join(' ');
+    scope0.length = 0;
+    scope0.push(...sc);
+  }
   const tailCode = T(body, scope0);
   const freeK = k(freeSyms);
   const src = `"use strict";
 const FREE = ${freeK};
 return function belCompiled(clo, args) {
-  if (args.length ${restName !== null ? '<' : '!=='} ${paramNames.length}) return R.slow(clo, args);
-  let ${paramNames.map((n, i) => `${n} = args[${i}]`).concat(restName !== null ? [`${restName} = R.rest(args, ${paramNames.length})`] : []).concat(['$fc = null', '$head = null', '$last = null']).join(', ')};
-  ${hoisted.filter((n) => !paramNames.includes(n) && n !== restName).length ? 'let ' + hoisted.filter((n) => !paramNames.includes(n) && n !== restName).join(', ') + ';' : ''}
+  ${simpleParams
+    ? `if (args.length ${restName !== null ? '<' : '!=='} ${paramNames.length}) return R.slow(clo, args);`
+    : `if (args.length < ${minArgs}${restSym ? '' : ` || args.length > ${maxArgs}`}) return R.slow(clo, args);`}
+  let ${(simpleParams ? paramNames.map((n, i) => `${n} = args[${i}]`).concat(restName !== null ? [`${restName} = R.rest(args, ${paramNames.length})`] : []) : []).concat(['$fc = null', '$head = null', '$last = null']).join(', ')};
+  ${hoisted.filter((n) => !(simpleParams && (paramNames.includes(n) || n === restName))).length ? 'let ' + hoisted.filter((n) => !(simpleParams && (paramNames.includes(n) || n === restName))).join(', ') + ';' : ''}
   const $fin = (x) => ($last === null ? x : ($last.d = x, $head));
+  ${prologue}
   for (;;) {
     ${tailCode}
   }
