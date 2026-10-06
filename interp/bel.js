@@ -1363,10 +1363,11 @@ function compCore(e, sf) {
 // A closure that runs often is compiled to JavaScript source when its body
 // can be compiled without changing what Bel programs can observe:
 //
-// - Only bodies that create no closures and never mention `scope` are
-//   compiled, because a closure's environment is the whole alist in scope
-//   when it is created, so any variable could be reached through it. In those
-//   bodies parameters and `let` variables are JS locals: no alist cells.
+// - In bodies that create no closures and never mention `scope`, parameters
+//   and `let` variables are JS locals: no alist cells. Other bodies compile in
+//   cells mode: every variable is a real (name . value) pair on a real alist,
+//   built exactly as ev builds it, because a closure's environment is the
+//   whole alist in scope when it is created and Bel programs can take it apart.
 // - Free variables are read through the closure's real environment cells
 //   (cached per closure, re-resolved after any xar/xdr), globals through
 //   their global cells.
