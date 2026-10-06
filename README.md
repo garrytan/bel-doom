@@ -83,6 +83,15 @@ Bel has no arrays, so the engine is built from lists. The frame protocol is colu
 - The spectre is drawn as an ordinary demon. Barrel chains advance one tic per link.
 - Bel recursion runs on the JavaScript stack. The Node tools start with a 7.8 MB stack; in a browser worker about 1,000 nested non-tail calls fit, so the engine uses tail recursion and `map`/`foldl` for long lists.
 
+## Rebuilding the WADs
+
+`wad/e1m1.wad` and `wad/sounds.wad` are generated from Freedoom 0.13.0 and checked in. To rebuild them, download `freedoom-0.13.0.zip` from the Freedoom releases on GitHub and run:
+
+```sh
+FREEDOOM_WAD=path/to/freedoom1.wad python3 tools/mkwad.py
+FREEDOOM_WAD=path/to/freedoom1.wad python3 tools/mksounds.py
+```
+
 ## Layout
 
 ```

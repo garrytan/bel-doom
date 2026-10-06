@@ -11,8 +11,7 @@ Layout (chosen so the Bel loader can parse it cheaply):
 import os, shutil, struct, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC = os.environ.get('FREEDOOM_WAD',
-                     '/home/user/.capy/work/ref/freedoom-0.13.0/freedoom1.wad')
+SRC = os.environ.get('FREEDOOM_WAD', 'freedoom1.wad')
 OUT = os.path.join(ROOT, 'wad', 'e1m1.wad')
 MAP = 'E1M1'
 MAP_LUMPS = ['THINGS', 'LINEDEFS', 'SIDEDEFS', 'VERTEXES', 'SEGS',

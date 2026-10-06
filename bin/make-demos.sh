@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Rebuild the demo videos from the engine in this checkout.
-#   bin/make-demos.sh [OUTDIR]        (default ~/.capy/work/front)
+#   bin/make-demos.sh [OUTDIR]        (default out/)
 # Writes OUTDIR/demo/{demo.mp4,demo.gif,demo.wav,contact.png} (headless, 35 tics/s, with sound) and
 # OUTDIR/live/live.mp4 (the web page in headless Chromium, recorded in real time).
 # Env: ROUTE=key script (default bin/demo-route.txt), ROOT=alternate repo root holding interp/ doom/ wad/.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-OUT="${1:-$HOME/.capy/work/front}"
+OUT="${1:-out}"
 ROUTE="${ROUTE:-bin/demo-route.txt}"
 ROOTARG=()
 [ -n "${ROOT:-}" ] && ROOTARG=(--root "$ROOT")

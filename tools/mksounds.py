@@ -3,7 +3,7 @@
 
 Source: Freedoom 0.13.0 freedoom1.wad (BSD licensed, see wad/COPYING-freedoom.txt).
 The Bel engine never reads this file; it writes S<lumpname>\\n packets and the host
-(web/main.js, bin/doom-record.mjs) loads and mixes the samples (see CONTRACT.md).
+(web/main.js, bin/doom-record.mjs) loads and mixes the samples (see docs/protocol.md).
 
 Monster sounds cover the monster types placed in E1M1's THINGS, which the script
 checks against the map: zombieman 3004, shotgun guy 9, imp 3001, demon 3002, spectre 58.
@@ -11,7 +11,7 @@ checks against the map: zombieman 3004, shotgun guy 9, imp 3001, demon 3002, spe
 import os, struct, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC = os.environ.get('FREEDOOM_WAD', '/home/user/.capy/work/ref/freedoom-0.13.0/freedoom1.wad')
+SRC = os.environ.get('FREEDOOM_WAD', 'freedoom1.wad')
 OUT = os.path.join(ROOT, 'wad', 'sounds.wad')
 
 PLAYER = ['DSPLPAIN', 'DSPLDETH', 'DSPDIEHI', 'DSOOF', 'DSNOWAY', 'DSSLOP']
