@@ -60,7 +60,7 @@ function stopVoice(v) { v.onended = null; try { v.stop(); } catch {} }
 
 function playSounds(names) {
   if (!names || !names.length || sound.muted || !sound.lumps || !sound.ctx || sound.ctx.state !== 'running') return;
-  for (const name of new Set(names)) {
+  for (const name of names) {
     const buf = soundBuffer(name);
     if (!buf) continue;
     while (sound.voices.length >= 8) stopVoice(sound.voices.shift());
