@@ -1,0 +1,70 @@
+; Doom in Bel: math.
+
+;;;; Math: Bel has no trig or square roots, so we grow our own.
+
+(set pi 3.141592653589793)
+
+(def clamp (x lo hi)
+  (if (< x lo) lo
+      (> x hi) hi
+               x))
+
+(def sin (a)
+  (let x (- a (* 2 pi (floor (/ (+ a pi) (* 2 pi)))))
+    (with (term x sum x k 1)
+      (while (< k 21)
+        (set term (/ (* term x x -1) (* (+ k 1) (+ k 2)))
+             sum  (+ sum term)
+             k    (+ k 2)))
+      sum)))
+
+(def cos (a)
+  (sin (+ a (/ pi 2))))
+
+; Newton's method from above: every guess stays >= the root, so stop when
+; the guess and x/guess agree.
+(def sqrt (x)
+  (if (<= x 0)
+      0
+      (let g (max x 1)
+        (while (> (- g (/ x g)) (* g 0.000000000001))
+          (set g (/ (+ g (/ x g)) 2)))
+        g)))
+
+(def atan (v)
+  (let u (/ v (+ 1 (sqrt (+ 1 (* v v)))))
+    (with (p u sum u k 1 u2 (* u u))
+      (while (< k 41)
+        (set k   (+ k 2)
+             p   (* p u2 -1)
+             sum (+ sum (/ p k))))
+      (* 2 sum))))
+
+(def atan2 (y x)
+  (if (> (abs x) (abs y))
+      (let a (atan (/ y x))
+        (if (>= x 0) a
+            (< y 0)  (- a pi)
+                     (+ a pi)))
+      (= y 0)
+      0
+      (- (if (< y 0) (/ pi -2) (/ pi 2)) (atan (/ x y)))))
+
+(def dist (x1 y1 x2 y2)
+  (sqrt (+ (* (- x2 x1) (- x2 x1)) (* (- y2 y1) (- y2 y1)))))
+
+; Park-Miller minimal standard generator: exact in doubles.
+(set seed 1)
+
+(def random (n)
+  (set seed (mod (* seed 16807) 2147483647))
+  (mod seed n))
+
+(def iota (n)
+  (let xs nil
+    (for i 1 n (set xs (cons (- n i) xs)))
+    xs))
+
+(def flag (flags bit)
+  (odd (floor (/ flags bit))))
+

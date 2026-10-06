@@ -1,0 +1,71 @@
+; Doom in Bel.
+;
+; A WAD loader, BSP renderer and game loop for Freedoom's E1M1, written in
+; Paul Graham's Bel.  Entry points (see CONTRACT.md for the frame protocol):
+;
+;   (doom-init "wad/e1m1.wad")  load the level, write the palette packet
+;   (doom-frame "wq")           run one tic with the given keys held, write a frame
+;
+; Bel has no arrays, so everything here is lists: the framebuffer is a list of
+; columns (the frame protocol is column-major, so a column is the natural unit),
+; textures are lists of columns, and the per-column clip state is three lists
+; we walk in lockstep with the framebuffer.
+
+;;;; Screen
+
+; Doom's low-detail 160x100 by default; (set-resolution 320 200) before
+; doom-init gives high detail.  The status bar takes the bottom 16%, as in
+; Doom, and the projection gives a 90 degree field of view.
+(def set-resolution (w h)
+  (set screen-w w
+       screen-h h
+       view-h   (- h (round (* h 0.16)))
+       half-w   (/ w 2)
+       half-h   (/ (- h (round (* h 0.16))) 2)
+       focal    (/ w 2)))
+
+(set-resolution 160 100)
+
+(set near 1)              ; near clipping plane, in map units
+
+(set walk-speed 8         ; map units per tic (Doom runs 35 tics a second); r doubles it
+     turn-speed 0.07      ; radians per tic
+     view-height 41
+     player-radius 16
+     max-step 24)
+
+;;;; The engine
+
+(load "doom/math.bel")
+(load "doom/wad.bel")
+(load "doom/level.bel")
+(load "doom/render.bel")
+(load "doom/actors.bel")
+(load "doom/game.bel")
+
+;;;; Entry points
+
+(def doom-init ((o path "wad/e1m1.wad"))
+  (load-wad path)
+  (load-palette)
+  (load-textures)
+  (load-sprites)
+  (load-level)
+  (build-grid)
+  (spawn-things)
+  (setup-screen)
+  (set start-x px start-y py start-angle pangle ticks 0 movers nil)
+  (reset-player)
+  (prc \P)
+  (each b palette (prc (nchar b)))
+  t)
+
+(def doom-frame ((o keys ""))
+  (set ticks (+ ticks 1))
+  (player-tic keys)
+  (run-movers)
+  (run-actors)
+  (render-frame)
+  (draw-hud)
+  (send-frame)
+  t)

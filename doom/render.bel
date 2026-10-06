@@ -1,0 +1,429 @@
+; Doom in Bel: the renderer.
+
+;;;; Renderer
+
+(def setup-screen ()
+  (set view-rows (iota view-h)
+       xs (iota screen-w)
+       xangles (map [atan (/ (- half-w _ 0.5) focal)] xs)
+       fb (map [map [do (nchar 0)] (iota screen-h)] xs)
+       frame-count 0
+       hud-state nil
+       pain-table (tint-table 255 0 0 0.25)
+       bonus-table (tint-table 215 186 69 0.2))
+  (let sky (texture 'SKY1)
+    (let cm (car colormaps)
+      (set sky-tables
+           (map (fn (tc)
+                  (map [nth (car (drop (mod (floor (+ 100 (* (/ 320 screen-w) (- _ half-h)))) (cadr sky)) tc)) cm]
+                       view-rows))
+                (texture-cols sky))))))
+
+; Distance to a floor or ceiling is constant along a screen row, and so is
+; its light, so each visible sector gets a per-frame table of
+; (distance . colormap) per row for its floor and its ceiling.
+(def plane-table (start h)
+  (let h (max h 1)
+    (map (fn (y)
+           (let z (/ (* h focal) (max (abs (- half-h y 0.5)) 0.5))
+             (cons z (nth (+ 1 (clamp (floor (- start (/ 1280 z))) 0 31)) colormaps))))
+         view-rows)))
+
+(def sector-tables (sec)
+  (let (flo cei light sky ff cf tag special cache) sec
+    (unless (= (car cache) frame-count)
+      (let start (light-start light)
+        (xar cache frame-count)
+        (xar (cdr cache) (plane-table start (- vz flo)))
+        (xar (cddr cache) (plane-table start (- cei vz)))))
+    (cdr cache)))
+
+(def fill-span (col ya yb tab)
+  (with (cell (drop ya col) tp (drop ya tab))
+    (while (<= ya yb)
+      (xar cell (car tp))
+      (set cell (cdr cell) tp (cdr tp) ya (+ ya 1)))))
+
+; Texture-map rows ya..yb of a floor or ceiling along the view ray (rx, ry):
+; the row's distance gives the point on the plane, its low six bits the texel.
+(def flat-span (col ya yb tab rows rx ry)
+  (with (cell (drop ya col) tp (drop ya tab))
+    (while (<= ya yb)
+      (let (z . cm) (car tp)
+        (xar cell (nth (nth (+ 1 (mod (floor (+ px (* z rx))) 64))
+                            (nth (+ 1 (mod (floor (- 0 py (* z ry))) 64)) rows))
+                       cm)))
+      (set cell (cdr cell) tp (cdr tp) ya (+ ya 1)))))
+
+; Draw rows ya..yb of a wall column.  v is the texture row at the center of
+; row ya; it grows by step (map units per pixel) down the column.
+(def wall-span (col ya yb tex u ttop step cm)
+  (when (<= ya yb)
+    (let (w h cols . rest) tex
+      (withs (tc   (nth (+ 1 (mod (floor u) w)) (or cols (composite tex)))
+              v    (mod (- ttop (* (- half-h ya 0.5) step)) h)
+              cell (drop ya col))
+        (while (<= ya yb)
+          (xar cell (nth (car (drop (floor v) tc)) cm))
+          (set cell (cdr cell) v (+ v step) ya (+ ya 1)))))))
+
+(def range-open (xa xb)
+  (let i (pos nil (drop xa solid))
+    (and i (<= i (+ (- xb xa) 1)))))
+
+; Could anything in this node's bounding box still be visible?
+(def box-visible (box)
+  (let (top bot left right) box
+    (or (and (<= left px right) (<= bot py top))
+        (with (xa screen-w xb -1 behind 0 lefts 0 rights 0)
+          (each (x y) (list (list left top) (list right top)
+                            (list left bot) (list right bot))
+            (withs (dx (- x px)
+                    dy (- y py)
+                    z  (+ (* dx vcos) (* dy vsin))
+                    s  (- (* dx vsin) (* dy vcos)))
+              (if (> s z)     (set rights (+ rights 1)))
+              (if (< s (- z)) (set lefts (+ lefts 1)))
+              (if (< z near)
+                  (set behind (+ behind 1))
+                  (let sx (+ half-w (/ (* s focal) z))
+                    (set xa (min xa sx) xb (max xb sx))))))
+          (if (or (= rights 4) (= lefts 4) (= behind 4)) nil
+              (> behind 0)                              t
+              (range-open (max 0 (floor xa)) (min (- screen-w 1) (floor xb))))))))
+
+(def render-node (n)
+  (when (< solid-count screen-w)
+    (if (id (car n) 'sub)
+        (each sg (cadr n) (render-seg sg))
+        (let (tag x y dx dy rbox lbox right left) n
+          (if (> (* dy (- px x)) (* dx (- py y)))
+              (do (render-node right)
+                  (if (box-visible lbox) (render-node left)))
+              (do (render-node left)
+                  (if (box-visible rbox) (render-node right))))))))
+
+; Transform a seg into view space, clip it to the near plane, project it, and
+; hand its visible columns to draw-columns.
+(def render-seg (sg)
+  (let (x1 y1 x2 y2 slen uoff . rest) sg
+    (when (< (* (- x2 x1) (- py y1)) (* (- y2 y1) (- px x1)))
+      (withs (ax (- x1 px) ay (- y1 py) bx (- x2 px) by (- y2 py)
+              z1 (+ (* ax vcos) (* ay vsin))
+              s1 (- (* ax vsin) (* ay vcos))
+              z2 (+ (* bx vcos) (* by vsin))
+              s2 (- (* bx vsin) (* by vcos))
+              u1 uoff
+              u2 (+ uoff slen))
+        (unless (and (< z1 near) (< z2 near))
+          (if (< z1 near)
+              (let f (/ (- near z1) (- z2 z1))
+                (set s1 (+ s1 (* f (- s2 s1))) u1 (+ u1 (* f slen)) z1 near))
+              (< z2 near)
+              (let f (/ (- near z2) (- z1 z2))
+                (set s2 (+ s2 (* f (- s1 s2))) u2 (- u2 (* f slen)) z2 near)))
+          (withs (sx1 (+ half-w (/ (* s1 focal) z1))
+                  sx2 (+ half-w (/ (* s2 focal) z2))
+                  xa  (max 0 (ceil (- sx1 0.5)))
+                  xb  (min (- screen-w 1) (- (ceil (- sx2 0.5)) 1)))
+            (when (and (< sx1 sx2) (<= xa xb) (range-open xa xb))
+              (withs (iz1 (/ 1 z1)
+                      iz2 (/ 1 z2)
+                      diz (/ (- iz2 iz1) (- sx2 sx1))
+                      duz (/ (- (* u2 iz2) (* u1 iz1)) (- sx2 sx1))
+                      dx  (- (+ xa 0.5) sx1))
+                (draw-columns sg xa xb (+ iz1 (* dx diz)) (+ (* u1 iz1) (* dx duz))
+                              diz duz)))))))))
+
+; Walk the seg's screen columns, drawing ceiling, floor and wall pieces
+; between each column's clip bounds and narrowing the bounds as we go.
+(def draw-columns (sg xa xb iz uz diz duz)
+  (withs ((x1 y1 x2 y2 slen uoff yoff front back peg-top peg-bottom fake
+           upper mid lower . rest) sg
+          (ff fc light fsky fflat cflat . frest) front
+          (ftab ctab) (sector-tables front)
+          frows (flat fflat)
+          crows (if fsky nil (flat cflat))
+          fh    (- ff vz)
+          ch    (- fc vz)
+          bfh   (if back (- (car back) vz))
+          bch   (if back (- (cadr back) vz))
+          start (light-start (+ light (* 16 fake)))
+          ttop  (if back
+                    (if upper (if peg-top ch (+ bch (cadr upper))))
+                    (if mid (if peg-bottom (+ fh (cadr mid)) ch)))
+          btop  (if (and back lower) (if peg-bottom ch bfh))
+          fbp   (drop xa fb)
+          tp    (drop xa ctop)
+          bp    (drop xa cbot)
+          sp    (drop xa solid)
+          kp    (drop xa sky-cols)
+          rp    (drop xa rays)
+          ep    (drop xa clips)
+          mtop  (if (and back mid)
+                    (+ yoff (if peg-bottom (+ (max fh bfh) (cadr mid)) (min (- fc vz) bch))))
+          mcols nil
+          x     xa)
+    (if (and back fsky (nth 4 back)) (set ch bch))
+    (while (<= x xb)
+      (unless (car sp)
+        (withs (top  (car tp)
+                bot  (car bp)
+                col  (car fbp)
+                z    (/ 1 iz)
+                u    (* uz z)
+                k    (* focal iz)
+                step (/ z focal)
+                cm   (nth (+ 1 (clamp (floor (- start (min (* 1280 iz) 23))) 0 31)) colormaps)
+                yt   (ceil (- half-h (* ch k) 0.5))
+                yb   (- (ceil (- half-h (* fh k) 0.5)) 1))
+          (if (> yt top)
+              (if fsky
+                  (fill-span col top (min (- yt 1) bot) (car kp))
+                  (flat-span col top (min (- yt 1) bot) ctab crows (car (car rp)) (cdr (car rp)))))
+          (if (< yb bot)
+              (flat-span col (max (+ yb 1) top) bot ftab frows (car (car rp)) (cdr (car rp))))
+          (if back
+              (withs (ybc (ceil (- half-h (* bch k) 0.5))
+                      ybf (- (ceil (- half-h (* bfh k) 0.5)) 1)
+                      nt  (max top yt)
+                      nb  (min bot yb))
+                (when (< bch ch)
+                  (if upper (wall-span col nt (min (- ybc 1) bot) upper u (+ ttop yoff) step cm))
+                  (set nt (max nt ybc)))
+                (when (> bfh fh)
+                  (if lower (wall-span col (max (+ ybf 1) top) nb lower u (+ btop yoff) step cm))
+                  (set nb (min nb ybf)))
+                (if (and mid (<= nt nb))
+                    (push (list x iz u nt nb cm) mcols))
+                (xar tp nt)
+                (xar bp nb)
+                (if (or (> nt top) (< nb bot))
+                    (xar ep (cons (list iz nt nb) (car ep))))
+                (when (> nt nb)
+                  (xar sp t)
+                  (set solid-count (+ solid-count 1))))
+              (do (if mid (wall-span col (max yt top) (min yb bot) mid u (+ ttop yoff) step cm))
+                  (xar ep (cons (list iz view-h -1) (car ep)))
+                  (xar sp t)
+                  (set solid-count (+ solid-count 1))))))
+      (set x   (+ x 1)
+           iz  (+ iz diz)
+           uz  (+ uz duz)
+           fbp (cdr fbp)
+           tp  (cdr tp)
+           bp  (cdr bp)
+           sp  (cdr sp)
+           kp  (cdr kp)
+           rp  (cdr rp)
+           ep  (cdr ep)))
+    (if mcols
+        (push (list (/ 1 (cadr (nth (+ 1 (floor (/ (len mcols) 2))) mcols)))
+                    'masked
+                    (list mcols mid mtop))
+              masked))))
+
+(def render-frame ()
+  (set frame-count (+ frame-count 1)
+       vcos (cos pangle)
+       vsin (sin pangle)
+       ctop (map [do 0] xs)
+       cbot (map [do (- view-h 1)] xs)
+       solid (map [do nil] xs)
+       solid-count 0
+       clips (map [do nil] xs)
+       masked nil
+       sky-cols (map [nth (+ 1 (mod (floor (* (+ pangle _) (/ 512 pi))) 256)) sky-tables]
+                     xangles)
+       rays (map (fn (x)
+                   (let k (/ (- (+ x 0.5) half-w) focal)
+                     (cons (+ vcos (* k vsin)) (- vsin (* k vcos)))))
+                 xs))
+  (render-node root)
+  (draw-sprites)
+  (draw-weapon)
+  (if (> pain-tics 0)  (tint pain-table)
+      (> bonus-tics 0) (tint bonus-table)))
+
+; Doom flashes the palette red when you are hurt and gold when you pick
+; something up.  We have one palette, so we remap the view through a table
+; of the nearest colors to each color blended toward red or gold.
+(def tint-table (r g b f)
+  (map (fn ((cr cg cb))
+         (nchar (nearest-color (+ (* cr (- 1 f)) (* r f))
+                               (+ (* cg (- 1 f)) (* g f))
+                               (+ (* cb (- 1 f)) (* b f)))))
+       rgb))
+
+(def tint (tab)
+  (each col fb
+    (let cell col
+      (repeat view-h
+        (xar cell (nth (+ 1 (charn (car cell))) tab))
+        (set cell (cdr cell))))))
+
+(def send-frame ()
+  (prc \F)
+  (each col fb (map prc col)))
+
+
+;;;; Sprites
+
+; Things in sectors we drew this frame, sorted far to near and drawn over
+; the walls.  Each column's clip events, recorded front to back by
+; draw-columns as (1/z top bottom), say which rows are still open behind
+; each wall, so a sprite at depth z uses the last event nearer than z.
+(def draw-sprites ()
+  (let vis nil
+    (each m mobjs
+      (when (= (car (nth 9 (m 'sec))) frame-count)
+        (withs (dx (- (m 'x) px)
+                dy (- (m 'y) py)
+                z  (+ (* dx vcos) (* dy vsin))
+                s  (- (* dx vsin) (* dy vcos)))
+          (if (and (> z 4) (< (abs s) (+ z 64)))
+              (push (list z s m) vis)))))
+    (each (z s m) (sort (fn (a b) (> (car a) (car b))) (append masked vis))
+      (if (= s 'masked)
+          (apply draw-masked m)
+          (draw-sprite m z s)))))
+
+; The see-through middle texture of a two-sided line (grates, fences),
+; drawn once between floor and ceiling and painted in depth order with the
+; sprites.  Each column was recorded as (x 1/z u top bottom colormap).
+(def draw-masked (mcols tex mtop)
+  (let (w h . rest) tex
+    (let cols (masked-cols tex)
+      (each (x iz u top bot cm) mcols
+        (withs (k    (* focal iz)
+                ytop (- half-h (* mtop k))
+                ya   (max top (ceil (- ytop 0.5)))
+                yb   (min bot (- (ceil (- (+ ytop (* h k)) 0.5)) 1)))
+          (if (<= ya yb)
+              (sprite-span (nth (+ x 1) fb) ya yb (nth (+ 1 (mod (floor u) w)) cols)
+                           (/ (- (+ ya 0.5) ytop) k) (/ 1 k) cm)))))))
+
+; Which of the eight rotations faces us: 1 is the front.
+(def sprite-rotation (m)
+  (mod (floor (/ (+ (- (atan2 (- (m 'y) py) (- (m 'x) px)) (m 'angle)) (* pi 1.125))
+                 (* pi 0.25)))
+       8))
+
+(def draw-sprite (m z s)
+  (let rots (m 'rots)
+    (when rots
+      (withs ((name . flip)     (or (nth (+ 1 (if (id (car rots) (cadr rots)) 0 (sprite-rotation m)))
+                                         rots)
+                                    (car rots))
+              (w h lo to cols) (picture name)
+              sec   (m 'sec)
+              mz    (or (m 'z) (if (= (m 'class) 'hanging) (- (cadr sec) to) (car sec)))
+              scale (/ focal z)
+              step  (/ z focal)
+              iz    (/ 1 z)
+              x1    (+ half-w (* (- s lo) scale))
+              xa    (max 0 (ceil (- x1 0.5)))
+              xb    (min (- screen-w 1) (- (ceil (- (+ x1 (* w scale)) 0.5)) 1))
+              ytop  (- half-h (* (- (+ mz to) vz) scale))
+              ya0   (ceil (- ytop 0.5))
+              yb0   (- (ceil (- (+ ytop (* h scale)) 0.5)) 1)
+              cm    (if (m 'bright)
+                        (car colormaps)
+                        (nth (+ 1 (clamp (floor (- (light-start (nth 3 sec)) (min (* 1280 iz) 23)))
+                                         0 31))
+                             colormaps))
+              fbp   (drop xa fb)
+              cp    (drop xa clips)
+              x     xa)
+        (while (<= x xb)
+          (withs (tx (clamp (floor (* (- (+ x 0.5) x1) step)) 0 (- w 1))
+                  ev (car cp))
+            (while (and ev (<= (car (car ev)) iz))
+              (set ev (cdr ev)))
+            (withs ((top bot) (if ev (cdr (car ev)) (list 0 (- view-h 1)))
+                    ya        (max ya0 top)
+                    yb        (min yb0 bot))
+              (if (<= ya yb)
+                  (sprite-span (car fbp) ya yb (nth (+ 1 (if flip (- w 1 tx) tx)) cols)
+                               (* (- (+ ya 0.5) ytop) step) step cm))))
+          (set x (+ x 1) fbp (cdr fbp) cp (cdr cp)))))))
+
+(def sprite-span (col ya yb pcol v step cm)
+  (let cell (drop ya col)
+    (while (<= ya yb)
+      (let c (car (drop (floor v) pcol))
+        (if (and c (> c 0)) (xar cell (nth c cm))))
+      (set cell (cdr cell) v (+ v step) ya (+ ya 1)))))
+
+;;;; Weapon and status bar
+
+; Draw a picture given in Doom's 320x200 screen coordinates, sampling every
+; k-th pixel at our resolution (k is 2 at 160x100), clipped to rows ya..yb.
+(def draw-picture (name x y cm ya yb)
+  (let (w h lo to cols) (picture name)
+    (withs (k    (/ 320 screen-w)
+            left (floor (- x lo))
+            top  (floor (- y to))
+            sxa  (max 0 (ceil (/ left k)))
+            sxb  (min (- screen-w 1) (floor (/ (+ left w -1) k)))
+            sya  (max ya (ceil (/ top k)))
+            syb  (min yb (floor (/ (+ top h -1) k)))
+            pc   (drop (- (* k sxa) left) cols))
+      (when (and (<= sxa sxb) (<= sya syb))
+        (each col (first (+ (- sxb sxa) 1) (drop sxa fb))
+          (with (cell (drop sya col)
+                 pp   (drop (- (* k sya) top) (car pc)))
+            (repeat (+ (- syb sya) 1)
+              (let c (car pp)
+                (if (> c 0) (xar cell (nth c cm))))
+              (set cell (cdr cell) pp (drop k pp))))
+          (set pc (drop k pc)))))))
+
+(set pistol-frames (map [cons _ (sym (list \P \I \S \G _ \0))] "ABC")
+     digits (map [sym (snoc "STTNUM" (nchar (+ 48 _)))] (iota 10)))
+
+(def draw-weapon ()
+  (when (> health 0)
+    (withs (frame (if (> wtics 9) \B (> wtics 5) \C (> wtics 2) \B \A)
+            phase (* ticks 0.2)
+            bx    (if (> wtics 0) 0 (* bob 6 (cos phase)))
+            by    (if (> wtics 0) 0 (* bob 4 (abs (sin phase))))
+            cm    (nth (+ 1 (clamp (- (light-start (nth 3 (point-sector px py))) 23) 0 31))
+                       colormaps))
+      (if (> wtics 9)
+          (draw-picture 'PISFA0 (+ 1 bx) (+ 16 by) (car colormaps) 0 (- view-h 1)))
+      (draw-picture (cdr (get frame pistol-frames)) (+ 1 bx) (+ 16 by) cm 0 (- view-h 1)))))
+
+(def draw-number (n x y cm)
+  (let n (max 0 n)
+    (if (= n 0)
+        (draw-picture (car digits) (- x 14) y cm view-h (- screen-h 1))
+        (while (> n 0)
+          (set x (- x 14))
+          (draw-picture (nth (+ 1 (mod n 10)) digits) x y cm view-h (- screen-h 1))
+          (set n (floor (/ n 10)))))))
+
+(def face ()
+  (if (<= health 0)
+      'STFDEAD0
+      (sym (list \S \T \F \S \T
+                 (nchar (+ 48 (floor (/ (* (- 100 (min health 100)) 5) 101))))
+                 (nchar (+ 48 (if (< (mod ticks 60) 50) 1 (mod (floor (/ ticks 60)) 3))))))))
+
+; The status bar is only redrawn when something on it changes.
+(def draw-hud ()
+  (let state (list health armor ammo (face))
+    (unless (= state hud-state)
+      (set hud-state state)
+      (let cm (car colormaps)
+        (draw-picture 'STBAR 0 168 cm view-h (- screen-h 1))
+        (draw-picture 'STARMS 104 168 cm view-h (- screen-h 1))
+        (each (name x y) '((STYSNUM2 111 172) (STGNUM3 123 172) (STGNUM4 135 172)
+                           (STGNUM5 111 182) (STGNUM6 123 182) (STGNUM7 135 182))
+          (draw-picture name x y cm view-h (- screen-h 1)))
+        (draw-number ammo 44 171 cm)
+        (draw-number health 90 171 cm)
+        (draw-picture 'STTPRCNT 90 171 cm view-h (- screen-h 1))
+        (draw-number armor 221 171 cm)
+        (draw-picture 'STTPRCNT 221 171 cm view-h (- screen-h 1))
+        (draw-picture (face) 143 168 cm view-h (- screen-h 1))))))

@@ -1,0 +1,294 @@
+; Doom in Bel: things.  Monsters, items, decorations and effects are all
+; mobjs ("map objects"), made from a Bel template.
+
+;;;; Kinds
+
+; Every thing type on E1M1: (type sprite frames radius class . args)
+(set kinds
+  '((3004 POSS "AB"     20 zombie)
+    (9    SPOS "AB"     20 sergeant)
+    (3001 TROO "AB"     20 imp)
+    (3002 SARG "AB"     30 demon)
+    (58   SARG "AB"     30 demon)
+    (2035 BAR1 "AB"     10 barrel)
+    (2014 BON1 "ABCDCB" 20 health 1 200)
+    (2011 STIM "A"      20 health 10 100)
+    (2012 MEDI "A"      20 health 25 100)
+    (2013 SOUL "ABCDCB" 20 health 100 200)
+    (2023 PSTR "A"      20 health 100 100)
+    (2015 BON2 "ABCDCB" 20 armor 1 200)
+    (2018 ARM1 "AB"     20 armor 100 100)
+    (2019 ARM2 "AB"     20 armor 200 200)
+    (2007 CLIP "A"      20 ammo 10)
+    (2048 AMMO "A"      20 ammo 50)
+    (8    BPAK "A"      20 ammo 20)
+    (2008 SHEL "A"      20 item)
+    (2049 SBOX "A"      20 item)
+    (2010 ROCK "A"      20 item)
+    (2046 BROK "A"      20 item)
+    (2047 CELL "A"      20 item)
+    (17   CELP "A"      20 item)
+    (2001 SHOT "A"      20 ammo 8)
+    (2002 MGUN "A"      20 ammo 20)
+    (2003 LAUN "A"      20 item)
+    (2004 PLAS "A"      20 item)
+    (2005 CSAW "A"      20 item)
+    (5    BKEY "AB"     20 item)
+    (47   SMIT "A"      16 obstacle)
+    (54   TRE2 "A"      32 obstacle)
+    (43   TRE1 "A"      16 obstacle)
+    (2028 COLU "A"      16 obstacle)
+    (48   ELEC "A"      16 obstacle)
+    (26   POL6 "AB"     16 obstacle)
+    (60   GOR4 "A"      16 hanging)
+    (15   PLAY "N"      16 decor)
+    (10   PLAY "W"      16 decor)
+    (12   PLAY "W"      16 decor)
+    (18   POSS "L"      16 decor)
+    (19   SPOS "L"      16 decor)
+    (20   TROO "M"      16 decor)
+    (21   SARG "N"      16 decor)
+    (24   POL5 "A"      16 decor)))
+
+; (class health speed pain-chance pain-frame death-frames attack sounds)
+; attack: (kind shots damage-unit damage-dice frames), the last frame fires.
+; sounds: (sight pain death attack)
+(set monster-classes
+  '((zombie   20  2.5 200 \G "HIJKL"  (bullets 1 3 5  "EF")
+              ("DSPOSIT1" "DSPOPAIN" "DSPODTH1" "DSPISTOL"))
+    (sergeant 30  2.5 170 \G "HIJKL"  (bullets 3 3 5  "EF")
+              ("DSPOSIT2" "DSPOPAIN" "DSPODTH2" "DSSHOTGN"))
+    (imp      60  3 200 \H "IJKLM"  (bullets 1 3 8  "EFG")
+              ("DSBGSIT1" "DSPOPAIN" "DSBGDTH1" "DSFIRSHT"))
+    (demon    150 5 180 \H "IJKLMN" (bite    1 4 10 "EFG")
+              ("DSSGTSIT" "DSDMPAIN" "DSSGTDTH" "DSSGTATK"))))
+
+; Sound packet for the host: S, the sound lump name, newline.
+(def sfx (name)
+  (prc \S)
+  (each c name (prc c))
+  (prc (nchar 10)))
+
+(def monster-sfx (m i)
+  (sfx (nth i (nth 7 (m 'info)))))
+
+(tem mobj
+  x 0  y 0  z nil  angle 0  class nil  args nil  info nil
+  sprite nil  frames nil  frame nil  rots nil  bright nil
+  sec nil  state nil  tics 0  hp 0  radius 20  solid nil  shootable nil)
+
+;;;; Spawning
+
+(def spawn-things ()
+  (set mobjs nil actors nil items nil solids nil)
+  (each (x y angle type flags)
+        (records 'THINGS 10
+          [list (s16 _) (s16 (drop 2 _)) (s16 (drop 4 _)) (u16 (drop 6 _)) (u16 (drop 8 _))])
+    (let k (get type kinds)
+      (when (and k (flag flags 2) (no (flag flags 16)))
+        (spawn k x y (/ (* angle pi) 180))))))
+
+(def spawn (k x y angle)
+  (let (type sprite frames radius class . args) k
+    (let m (make mobj x x y y angle angle class class args args
+                      sprite (nom sprite) frames frames radius radius
+                      sec (point-sector x y))
+      (set-frame m (car frames))
+      (push m mobjs)
+      (aif (cdr (get class monster-classes))
+           (do (set (m 'info) it (m 'hp) (car it) (m 'state) 'idle
+                    (m 'solid) t (m 'shootable) t)
+               (push m actors)
+               (push m solids))
+           (= class 'barrel)
+           (do (set (m 'hp) 20 (m 'solid) t (m 'shootable) t)
+               (push m actors)
+               (push m solids))
+           (= class 'obstacle)
+           (do (set (m 'solid) t)
+               (push m solids))
+           (in class 'health 'armor 'ammo 'item)
+           (do (push m items)
+               (if (cdr frames) (push m actors)))
+           (cdr frames)
+           (push m actors))
+      m)))
+
+; Puffs, blood and explosions: short animations that remove themselves.
+(def spawn-effect (sprite frames x y z)
+  (let m (make mobj x x y y z z class 'effect sprite sprite frames frames
+                    sec (point-sector x y) bright (= sprite "PUFF") state 'anim)
+    (set-frame m (car frames))
+    (push m mobjs)
+    (push m actors)))
+
+(def set-frame (m c)
+  (unless (= (m 'frame) c)
+    (set (m 'frame) c
+         (m 'rots)  (cdr (get (sym (snoc (m 'sprite) c)) sprite-frames)))))
+
+(def enter (m state)
+  (set (m 'state) state (m 'tics) 0))
+
+(set reap nil)
+
+(def remove (m)
+  (set (m 'state) 'gone reap t))
+
+;;;; Thinking
+
+(def run-actors ()
+  (set reap nil)
+  (each m actors (think m))
+  (when reap
+    (set mobjs  (keep [no (= (_ 'state) 'gone)] mobjs)
+         actors (keep [no (= (_ 'state) 'gone)] actors)
+         items  (keep [no (= (_ 'state) 'gone)] items))))
+
+(def think (m)
+  (set (m 'tics) (+ (m 'tics) 1))
+  (if (m 'info)
+      (think-monster m (m 'info))
+      (in (m 'state) 'anim 'die)
+      (let i (floor (/ (m 'tics) 3))
+        (if (< i (len (m 'frames)))
+            (set-frame m (nth (+ i 1) (m 'frames)))
+            (remove m)))
+      (set-frame m (nth (+ 1 (mod (floor (/ ticks 4)) (len (m 'frames)))) (m 'frames)))))
+
+(def think-monster (m info)
+  (let (hp speed pain-chance pain-frame death-frames attack sounds) info
+    (case (m 'state)
+      idle   (do (set-frame m (if (< (mod ticks 16) 8) \A \B))
+                 (when (and (= (mod ticks 4) (mod (m 'x) 4)) (sees-player m))
+                   (monster-sfx m 1)
+                   (enter m 'chase)))
+      chase  (chase m speed attack)
+      attack (attack-step m attack)
+      pain   (if (> (m 'tics) 3) (enter m 'chase))
+      die    (let i (floor (/ (m 'tics) 4))
+               (if (< i (len death-frames))
+                   (set-frame m (nth (+ i 1) death-frames))
+                   (enter m 'dead))))))
+
+; A monster can only see the player from a sector we drew last frame (sight
+; is symmetric), within range, with no wall in between.
+(def sees-player (m)
+  (and (> health 0)
+       (= (car (nth 9 (m 'sec))) frame-count)
+       (< (abs (- (m 'x) px)) 1500)
+       (< (abs (- (m 'y) py)) 1500)
+       (clear-line (m 'x) (m 'y) px py)))
+
+(def face-player (m)
+  (set (m 'angle) (atan2 (- py (m 'y)) (- px (m 'x)))))
+
+(def chase (m speed attack)
+  (set-frame m (nth (+ 1 (mod (floor (/ (m 'tics) 4)) 4)) "ABCD"))
+  (let d (dist (m 'x) (m 'y) px py)
+    (if (and (> health 0)
+             (if (= (car attack) 'bite)
+                 (< d (+ (m 'radius) 60))
+                 (< (random 1000) 25))
+             (sees-player m))
+        (do (enter m 'attack) (face-player m))
+        (> d (+ (m 'radius) player-radius 8))
+        (let a (atan2 (- py (m 'y)) (- px (m 'x)))
+          (or (step-toward m a speed)
+              (step-toward m (+ a 0.8) speed)
+              (step-toward m (- a 0.8) speed)
+              (step-toward m (+ a 1.6) speed)
+              (step-toward m (- a 1.6) speed))))))
+
+(def step-toward (m a speed)
+  (withs (x   (+ (m 'x) (* speed (cos a)))
+          y   (+ (m 'y) (* speed (sin a)))
+          sec (point-sector x y))
+    (when (and (<= (abs (- (car sec) (car (m 'sec)))) max-step)
+               (>= (- (cadr sec) (car sec)) 56)
+               (no (wall-near x y (m 'radius) (car (m 'sec))))
+               (> (dist x y px py) (+ (m 'radius) player-radius)))
+      (set (m 'x) x (m 'y) y (m 'angle) a (m 'sec) sec)
+      t)))
+
+; Is there a wall within r of (x, y) that something standing at height floor
+; cannot pass?
+(def wall-near (x y r floor)
+  (some (fn (ln)
+          (let (x1 y1 x2 y2 front back blocking minx maxx miny maxy len2 . rest) ln
+            (and (or blocking
+                     (let (ff fc . frest) front
+                       (let (bf bc . brest) back
+                         (or (> (- (max ff bf) floor) max-step)
+                             (< (- (min fc bc) (max ff bf)) 56)))))
+                 (withs (dx (- x2 x1)
+                         dy (- y2 y1)
+                         f  (clamp (/ (+ (* (- x x1) dx) (* (- y y1) dy)) len2) 0 1)
+                         cx (+ x1 (* f dx))
+                         cy (+ y1 (* f dy)))
+                   (< (+ (* (- x cx) (- x cx)) (* (- y cy) (- y cy))) (* r r))))))
+        (lines-near x y)))
+
+(def attack-step (m attack)
+  (let frames (nth 5 attack)
+    (let i (floor (/ (- (m 'tics) 1) 4))
+      (if (< i (len frames))
+          (do (set-frame m (nth (+ i 1) frames))
+              (if (= (m 'tics) (+ 1 (* 4 (- (len frames) 1))))
+                  (monster-fire m attack)))
+          (enter m 'chase)))))
+
+(def monster-fire (m attack)
+  (let (kind shots unit dice frames) attack
+    (face-player m)
+    (monster-sfx m 4)
+    (when (sees-player m)
+      (let d (dist (m 'x) (m 'y) px py)
+        (if (= kind 'bite)
+            (if (< d (+ (m 'radius) 70))
+                (hurt-player (* unit (+ 1 (random dice)))))
+            (repeat shots
+              (if (< (random 1000) (- 900 (/ d 3)))
+                  (hurt-player (* unit (+ 1 (random dice)))))))))))
+
+;;;; Damage
+
+(def damage (m n)
+  (set (m 'hp) (- (m 'hp) n))
+  (if (<= (m 'hp) 0)
+      (kill m)
+      (m 'info)
+      (if (< (random 256) (caddr (m 'info)))
+          (do (enter m 'pain)
+              (set-frame m (nth 4 (m 'info)))
+              (monster-sfx m 2))
+          (= (m 'state) 'idle)
+          (enter m 'chase))))
+
+(def kill (m)
+  (set (m 'solid) nil (m 'shootable) nil)
+  (enter m 'die)
+  (if (m 'info)
+      (monster-sfx m 3)
+      (sfx "DSBAREXP"))
+  (unless (m 'info)
+    (set (m 'sprite) "BEXP" (m 'frames) "ABCDE" (m 'bright) t (m 'frame) nil)
+    (set-frame m \A)
+    (explode m)))
+
+; A barrel blast hurts everything within 128 units, the player included.
+(def explode (m)
+  (each a actors
+    (when (a 'shootable)
+      (let d (dist (m 'x) (m 'y) (a 'x) (a 'y))
+        (if (< d 128) (damage a (floor (- 128 d)))))))
+  (let d (dist (m 'x) (m 'y) px py)
+    (if (< d 128) (hurt-player (floor (- 128 d))))))
+
+; Firing makes noise: idle monsters nearby wake up.
+(def make-noise ()
+  (each m actors
+    (if (and (= (m 'state) 'idle)
+             (< (abs (- (m 'x) px)) 1000)
+             (< (abs (- (m 'y) py)) 1000))
+        (enter m 'chase))))

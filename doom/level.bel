@@ -1,0 +1,142 @@
+; Doom in Bel: level geometry.
+
+;;;; Level
+
+; sector:  (floor ceil light sky floor-flat ceil-flat tag special cache)
+; line:    (x1 y1 x2 y2 front back blocking minx maxx miny maxy len2 flags special tag)
+; seg:     (x1 y1 x2 y2 len uoff yoff front back peg-top peg-bottom fake-light
+;           upper mid lower line)
+; subsector: (sub segs sector)
+; node:    (node x y dx dy right-box left-box right left)
+
+(def load-level ()
+  (let verts (records 'VERTEXES 4 [list (s16 _) (s16 (cddr _))])
+    (set sectors
+         (records 'SECTORS 26
+           (fn (b)
+             (let cflat (lump-name (drop 12 b))
+               (list (s16 b) (s16 (drop 2 b)) (s16 (drop 20 b))
+                     (id cflat 'F_SKY1)
+                     (lump-name (drop 4 b))
+                     cflat
+                     (s16 (drop 24 b)) (s16 (drop 22 b))
+                     (list nil nil nil))))))
+    (let sides (records 'SIDEDEFS 30
+                 (fn (b)
+                   (list (s16 b) (s16 (cddr b))
+                         (texture (lump-name (drop 4 b)))
+                         (texture (lump-name (drop 12 b)))
+                         (texture (lump-name (drop 20 b)))
+                         (nth (+ 1 (u16 (drop 28 b))) sectors))))
+      (let side (fn (i) (if (< i 65535) (nth (+ i 1) sides)))
+        (set lines
+             (records 'LINEDEFS 14
+               (fn (b)
+                 (withs ((x1 y1) (nth (+ 1 (u16 b)) verts)
+                         (x2 y2) (nth (+ 1 (u16 (cddr b))) verts)
+                         flags   (u16 (drop 4 b))
+                         right   (side (u16 (drop 10 b)))
+                         left    (side (u16 (drop 12 b)))
+                         r       player-radius)
+                   (list x1 y1 x2 y2
+                         (last right) (if left (last left))
+                         (or (no left) (flag flags 1))
+                         (- (min x1 x2) r) (+ (max x1 x2) r)
+                         (- (min y1 y2) r) (+ (max y1 y2) r)
+                         (+ (* (- x2 x1) (- x2 x1)) (* (- y2 y1) (- y2 y1)))
+                         flags (u16 (drop 6 b)) (u16 (drop 8 b))
+                         right left)))))
+        (set segs
+             (records 'SEGS 12
+               (fn (b)
+                 (withs ((x1 y1) (nth (+ 1 (u16 b)) verts)
+                         (x2 y2) (nth (+ 1 (u16 (drop 2 b))) verts)
+                         ln      (nth (+ 1 (u16 (drop 6 b))) lines)
+                         flags   (nth 13 ln)
+                         back?   (= (u16 (drop 8 b)) 1)
+                         sd      (nth (if back? 17 16) ln)
+                         other   (nth (if back? 16 17) ln))
+                   (list x1 y1 x2 y2
+                         (sqrt (+ (* (- x2 x1) (- x2 x1)) (* (- y2 y1) (- y2 y1))))
+                         (+ (s16 (drop 10 b)) (car sd))
+                         (cadr sd)
+                         (last sd)
+                         (if other (last other))
+                         (flag flags 8) (flag flags 16)
+                         (if (= y1 y2) -1 (= x1 x2) 1 0)
+                         (nth 3 sd) (nth 5 sd) (nth 4 sd)
+                         ln)))))
+        (set subsectors
+             (records 'SSECTORS 4
+               (fn (b)
+                 (let ss (first (u16 b) (drop (u16 (cddr b)) segs))
+                   (list 'sub ss (nth 8 (car ss)))))))
+        (set nodes
+             (records 'NODES 28
+               (fn (b)
+                 (let box [list (s16 _) (s16 (drop 2 _)) (s16 (drop 4 _)) (s16 (drop 6 _))]
+                   (list 'node (s16 b) (s16 (drop 2 b)) (s16 (drop 4 b)) (s16 (drop 6 b))
+                         (box (drop 8 b)) (box (drop 16 b))
+                         (u16 (drop 24 b)) (u16 (drop 26 b)))))))
+        (let child (fn (c)
+                     (if (> c 32767)
+                         (nth (+ 1 (- c 32768)) subsectors)
+                         (nth (+ c 1) nodes)))
+          (each n nodes
+            (let cell (drop 7 n)
+              (xar cell (child (car cell)))
+              (xar (cdr cell) (child (cadr cell))))))
+        (set root (last nodes))
+        (let start (find [= (nth 4 _) 1]
+                         (records 'THINGS 10
+                           [list (s16 _) (s16 (drop 2 _)) (s16 (drop 4 _)) (u16 (drop 6 _))]))
+          (set px (car start)
+               py (cadr start)
+               pangle (/ (* (caddr start) pi) 180)))))))
+
+(def point-sector (x y)
+  (let n root
+    (while (no (id (car n) 'sub))
+      (let (tag nx ny dx dy rb lb right left) n
+        (set n (if (> (* dy (- x nx)) (* dx (- y ny))) right left))))
+    (caddr n)))
+
+
+; A coarse grid over the map: each 128-unit cell lists the lines within 32
+; units of it, so collision checks only look at nearby walls.
+(def build-grid ()
+  (set grid-x (- (apply min (map [nth 8 _] lines)) 64)
+       grid-y (- (apply min (map [nth 10 _] lines)) 64))
+  (set grid-cols (+ 2 (floor (/ (- (apply max (map [nth 9 _] lines)) grid-x) 128)))
+       grid-rows (+ 2 (floor (/ (- (apply max (map [nth 11 _] lines)) grid-y) 128))))
+  (set grid (map [map [do nil] (iota grid-cols)] (iota grid-rows)))
+  (each ln lines
+    (let (x1 y1 x2 y2 front back blocking minx maxx miny maxy . rest) ln
+      (for cy (grid-row (- miny 16)) (grid-row (+ maxy 16))
+        (let row (nth (+ cy 1) grid)
+          (for cx (grid-col (- minx 16)) (grid-col (+ maxx 16))
+            (let cell (drop cx row)
+              (xar cell (cons ln (car cell))))))))))
+
+(def grid-col (x) (clamp (floor (/ (- x grid-x) 128)) 0 (- grid-cols 1)))
+(def grid-row (y) (clamp (floor (/ (- y grid-y) 128)) 0 (- grid-rows 1)))
+
+(def lines-near (x y)
+  (car (drop (grid-col x) (nth (+ 1 (grid-row y)) grid))))
+
+; Is the straight line between two points free of walls and closed doors?
+(def clear-line (ax ay bx by)
+  (with (minx (min ax bx) maxx (max ax bx) miny (min ay by) maxy (max ay by)
+         dx (- bx ax) dy (- by ay))
+    (no (some (fn (ln)
+                (let (x1 y1 x2 y2 front back blocking lx1 lx2 ly1 ly2 . rest) ln
+                  (and (< lx1 maxx) (> lx2 minx) (< ly1 maxy) (> ly2 miny)
+                       (or (no back)
+                           (<= (min (cadr front) (cadr back)) (max (car front) (car back))))
+                       (< (* (- (* dx (- y1 ay)) (* dy (- x1 ax)))
+                             (- (* dx (- y2 ay)) (* dy (- x2 ax))))
+                          0)
+                       (< (* (- (* (- x2 x1) (- ay y1)) (* (- y2 y1) (- ax x1)))
+                             (- (* (- x2 x1) (- by y1)) (* (- y2 y1) (- bx x1))))
+                          0))))
+              lines))))

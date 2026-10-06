@@ -1,0 +1,198 @@
+; Doom in Bel: WAD files, palette, flats, patches and textures.
+
+;;;; WAD files
+
+(def read-bytes (path)
+  (let s (ops path 'in)
+    (let bs nil
+      (whilet c (rdc s)
+        (set bs (cons (charn c) bs)))
+      (cls s)
+      (rev bs))))
+
+(def u16 (bs) (+ (car bs) (* 256 (cadr bs))))
+
+(def s16 (bs)
+  (let n (u16 bs)
+    (if (> n 32767) (- n 65536) n)))
+
+(def s32 (bs) (+ (u16 bs) (* 65536 (s16 (cddr bs)))))
+
+(def lump-name (bs)
+  (sym (map nchar (keep [> _ 0] (first 8 bs)))))
+
+; Each lump gets its own list of bytes, cut from the file in one pass, so
+; parsing a lump never walks the rest of the file.
+(def load-wad (path)
+  (let bs (read-bytes path)
+    (with (dir (drop (s32 (drop 8 bs)) bs) pos 0 cur bs)
+      (set lumps
+           (accum a
+             (repeat (s32 (drop 4 bs))
+               (with (off (s32 dir) size (s32 (drop 4 dir)))
+                 (if (< off pos) (set pos 0 cur bs))
+                 (set cur (drop (- off pos) cur) pos off)
+                 (a (list (lump-name (drop 8 dir)) (first size cur) size)))
+               (set dir (drop 16 dir))))))))
+
+(def lump (name)
+  (cadr (get name lumps)))
+
+(def lump-size (name)
+  (caddr (get name lumps)))
+
+(def records (name size f)
+  (let bs (lump name)
+    (accum a
+      (repeat (/ (lump-size name) size)
+        (a (f bs))
+        (set bs (drop size bs))))))
+
+;;;; Palette, light and flats
+
+(def load-palette ()
+  (set palette (first 768 (lump 'PLAYPAL))
+       rgb (let bs palette
+             (accum a
+               (repeat 256
+                 (a (list (car bs) (cadr bs) (caddr bs)))
+                 (set bs (drop 3 bs)))))
+       colormaps (let bs (lump 'COLORMAP)
+                   (accum a
+                     (repeat 32
+                       (a (map nchar (first 256 bs)))
+                       (set bs (drop 256 bs)))))
+       flat-cache nil))
+
+(def nearest-color (r g b)
+  (with (best 0 bestd 1000000 i 0)
+    (each (cr cg cb) rgb
+      (let d (+ (* (- r cr) (- r cr)) (* (- g cg) (- g cg)) (* (- b cb) (- b cb)))
+        (if (< d bestd) (set best i bestd d)))
+      (set i (+ i 1)))
+    best))
+
+; A flat is 64 rows of 64 1-based palette indices, read on first use.
+(def flat (name)
+  (or (cdr (get name flat-cache))
+      (let bs (lump name)
+        (let rows (map (fn (r) (let row (first 64 bs) (set bs (drop 64 bs)) (map inc row)))
+                       (iota 64))
+          (set flat-cache (cons (cons name rows) flat-cache))
+          rows))))
+
+(def light-start (light)
+  (* 4 (- 15 (clamp (floor (/ light 16)) 0 15))))
+
+;;;; Patches and textures
+
+; A patch is a list of columns of 1-based palette indices, 0 = transparent.
+(def patch-raster (pb)
+  (with (w (u16 pb) h (u16 (cddr pb)))
+    (map (fn (px)
+           (let col (map [do 0] (iota h))
+             (let p (drop (s32 (drop (+ 8 (* 4 px)) pb)) pb)
+               (while (< (car p) 255)
+                 (with (cell (drop (car p) col) d (drop 3 p))
+                   (repeat (cadr p)
+                     (if cell (xar cell (+ 1 (car d))))
+                     (set cell (cdr cell) d (cdr d))))
+                 (set p (drop (+ (cadr p) 4) p))))
+             col))
+         (iota w))))
+
+; Texture: (width height columns patches masked-columns).  Columns are composited from the
+; patches the first time a texture is drawn, and each column is a circular
+; list so vertical tiling is just walking further.
+(def load-textures ()
+  (with (pb (lump 'PNAMES) tb (lump 'TEXTURE1))
+    (let patches (map [lump (lump-name (drop (+ 4 (* 8 _)) pb))]
+                      (iota (s32 pb)))
+      (set textures
+           (map (fn (i)
+                  (let b (drop (s32 (drop (+ 4 (* 4 i)) tb)) tb)
+                    (list (lump-name b)
+                          (s16 (drop 12 b))
+                          (s16 (drop 14 b))
+                          nil
+                          (map (fn (j)
+                                 (let p (drop (+ 22 (* 10 j)) b)
+                                   (list (s16 p) (s16 (cddr p))
+                                         (nth (+ 1 (u16 (drop 4 p))) patches))))
+                               (iota (s16 (drop 20 b))))
+                          nil)))
+                (iota (s32 tb)))))))
+
+(def texture (name)
+  (cdr (get name textures)))
+
+; Paint the patches into columns that start out as fill: 1 (black) for
+; walls, 0 (transparent) for the see-through middles of two-sided lines.
+(def paint-patches (tex fill)
+  (let (w h cols patches . rest) tex
+    (let cs (map (fn (x) (map [do fill] (iota h))) (iota w))
+      (each (ox oy pb) patches
+        (let x ox
+          (each pcol (patch-raster pb)
+            (when (and (>= x 0) (< x w))
+              (with (col (nth (+ x 1) cs) y oy)
+                (each v pcol
+                  (if (and (> v 0) (>= y 0) (< y h))
+                      (xar (drop y col) v))
+                  (set y (+ y 1)))))
+            (set x (+ x 1)))))
+      cs)))
+
+(def composite (tex)
+  (let cs (paint-patches tex 1)
+    (each c cs (xdr (lastcdr c) c))
+    (xar (cddr tex) cs)
+    cs))
+
+(def masked-cols (tex)
+  (or (nth 5 tex)
+      (let cs (paint-patches tex 0)
+        (xar (drop 4 tex) cs)
+        cs)))
+
+(def texture-cols (tex)
+  (or (caddr tex) (composite tex)))
+
+;;;; Pictures and sprites
+
+; A picture is (width height left-offset top-offset columns), the columns
+; from patch-raster.  Pictures are rasterized the first time they are drawn.
+(set picture-cache nil)
+
+(def picture (name)
+  (or (cdr (get name picture-cache))
+      (let pb (lump name)
+        (let pic (list (u16 pb) (u16 (cddr pb)) (s16 (drop 4 pb)) (s16 (drop 6 pb))
+                       (patch-raster pb))
+          (push (cons name pic) picture-cache)
+          pic))))
+
+; Sprite lumps are named like TROOA1 or TROOA2A8: four letters of sprite, a
+; frame letter and a rotation (0 means it looks the same from every side),
+; then optionally a second frame and rotation that use the picture mirrored.
+; sprite-frames maps a sprite frame like TROOA to its eight rotations, each
+; (lump . flipped).
+(def load-sprites ()
+  (set sprite-frames nil)
+  (let ls (drop (pos 'S_START (map car lumps)) lumps)
+    (each (name . rest) (first (- (pos 'S_END (map car ls)) 1) ls)
+      (let cs (nom name)
+        (add-rotation (sym (first 5 cs)) (nth 6 cs) name nil)
+        (if (> (len cs) 6)
+            (add-rotation (sym (snoc (first 4 cs) (nth 7 cs))) (nth 8 cs) name t))))))
+
+(def add-rotation (key rot name flip)
+  (with (rots (or (cdr (get key sprite-frames))
+                  (let r (map [do nil] (iota 8))
+                    (push (cons key r) sprite-frames)
+                    r))
+         entry (cons name flip))
+    (if (= rot \0)
+        (let p rots
+          (while p (xar p entry) (set p (cdr p))))
+        (xar (drop (- (charn rot) 49) rots) entry))))
