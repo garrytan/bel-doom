@@ -206,9 +206,11 @@ To rebuild the WADs from Freedoom 0.13.0: `FREEDOOM_WAD=path/to/freedoom1.wad py
 
 ## Credits
 
-Bel is by Paul Graham. The maps, textures, sprites and sounds are from [Freedoom](https://freedoom.github.io/) 0.13.0 (BSD license, see `wad/COPYING-freedoom.txt`). Doom is by id Software.
+Bel is by Paul Graham; `interp/bel.bel` is his spec, included unmodified. The maps, textures, sprites and sounds are from [Freedoom](https://freedoom.github.io/) 0.13.0 (BSD license, see `wad/COPYING-freedoom.txt`). Doom is by id Software.
+
+The code in this repository is MIT licensed; see [LICENSE](LICENSE).
 
 ## Changelog
 
-- 2026-10-06: README rewritten for a general audience; full interpreter reference in `docs/interpreter.md`; GitHub Pages entry point.
+- 2026-10-06: README rewritten for a general audience; full interpreter reference in `docs/interpreter.md`; GitHub Pages entry point; MIT license.
 - 2026-10-05: First version: interpreter, functional Doom engine, browser, terminal and video front ends, sound.
