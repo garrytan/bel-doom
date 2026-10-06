@@ -1,0 +1,5 @@
+(def fib (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))
+(def loop1 (n) (let s 0 (for i 1 n (set s (+ s i))) s))
+(def mklist (n) (let r nil (for i 1 n (push i r)) r))
+(set big (mklist 4096))
+(def nthsum (n) (let s 0 (for i 1 n (set s (+ s (nth (+ 1 (mod (* i 37) 4096)) big)))) s))
