@@ -1,5 +1,6 @@
 ; Doom in Bel: the renderer.  (render w) is a function from the world to a
-; frame: a list of screen-w columns, each a list of screen-h chars.
+; frame: a list of columns, one per screen column, each a list of chars,
+; one per screen row.
 ;
 ; Walls are drawn front to back by walking the BSP tree.  The state threaded
 ; through the walk is (columns solid count planes masked seen):
@@ -10,21 +11,54 @@
 ;            (1/z top bottom) each time a wall narrowed the column, for
 ;            clipping sprites later
 ;   solid    per column, t once it is closed
-;   count    how many columns are closed; the walk stops at screen-w
+;   count    how many columns are closed; the walk stops at the width
 ;   planes   floor and ceiling tables computed so far, by (start height)
 ;   masked   see-through middle textures to draw with the sprites
 ;   seen     sectors drawn, whose things may be visible
 
+;;;; The screen
+
+; The screen record, built once by doom-init from the requested size:
+;
+;   (width height view-h half-w half-h focal-x focal-y xmap ymap)
+;
+; view-h   rows of 3D view; the status bar takes the rest, 16% of the
+;          height (rounded), as in Doom
+; focal-x  width/2: a 90 degree field of view across the width
+; focal-y  4/5 of the height.  Doom draws 320x200 with one focal length,
+;          160, on both axes, and a 4:3 monitor shows each pixel 1.2 times
+;          taller than wide.  Keeping that picture on square pixels means
+;          focal-y = focal-x * (height/width) * 4/3 * 1.2, which is 4/5 of
+;          the height.  At 160x100 and 320x200 it equals focal-x exactly.
+; xmap     for each screen column, the column of Doom's 320x200 screen it
+;          shows: floor(x * 320 / width)
+; ymap     for each screen row, the row of Doom's 320x200 screen it shows.
+;          View rows map onto Doom's 168 view rows, floor(y * 168 / view-h);
+;          status bar rows onto its 32 bar rows,
+;          168 + floor((y - view-h) * 32 / (height - view-h)), so the bar
+;          exactly fills its rows at any height (77 rows at 640x480).
+;
+; Pictures (weapon, status bar, face, numbers) and the sky are sampled
+; through these nearest-neighbour maps, so any scale works, whole or not.
+(def make-screen (width height)
+  (let view-h (- height (round (/ (* 16 height) 100)))
+    (list width height view-h (/ width 2) (/ view-h 2) (/ width 2) (/ (* 4 height) 5)
+          (map [floor (/ (* _ 320) width)] (iota width))
+          (append (map [floor (/ (* _ 168) view-h)] (iota view-h))
+                  (map [+ 168 (floor (/ (* _ 32) (- height view-h)))] (iota (- height view-h)))))))
+
 (def render (w)
   (withs (lv     (at 'lv w)
+          scr    (at 'screen w)
+          (width height view-h . srest) scr
           angle  (at 'pangle w)
           vcos   (cos angle)
           vsin   (sin angle)
           v      (list (at 'px w) (at 'py w) (eye-z w) vcos vsin (at 'heights w) lv angle
-                       (sky-columns lv angle) (view-rays vcos vsin))
+                       (sky-columns lv angle) (view-rays scr vcos vsin) scr)
           st     (render-node (at 'root lv) v
-                              (list (fill screen-w (list 0 (- view-h 1) nil nil nil))
-                                    (fill screen-w nil) 0 nil nil nil))
+                              (list (fill width (list 0 (- view-h 1) nil nil nil))
+                                    (fill width nil) 0 nil nil nil))
           cols   (map column-pixels (car st))
           clips  (map [nth 5 _] (car st))
           scene  (draw-things w v cols clips (nth 5 st) (nth 6 st))
@@ -51,7 +85,7 @@
 ;;;; The BSP walk
 
 (def render-node (n v st)
-  (if (>= (caddr st) screen-w)
+  (if (>= (caddr st) (car (nth 11 v)))
       st
       (= (car n) 'sub)
       (foldl (fn (sg st) (render-seg sg v st)) st (cadr n))
@@ -68,7 +102,7 @@
 
 ; Could anything in this node's bounding box still be visible?
 (def box-visible (box v solid)
-  (let ((top bot left right) (px py vz vcos vsin . rest)) (list box v)
+  (let ((top bot left right) (px py vz vcos vsin heights lv angle skycols rays scr)) (list box v)
     (or (and (<= left px right) (<= bot py top))
         (let corners (map (fn ((x y))
                             (with (dx (- x px) dy (- y py))
@@ -81,10 +115,11 @@
               nil
               (some [< (car _) near] corners)
               t
-              (let xs (map [+ half-w (/ (* (cadr _) focal) (car _))] corners)
-                (range-open (max 0 (floor (apply min xs)))
-                            (min (- screen-w 1) (floor (apply max xs)))
-                            solid)))))))
+              (let (width height view-h half-w half-h focal-x . srest) scr
+                (let xs (map [+ half-w (/ (* (cadr _) focal-x) (car _))] corners)
+                  (range-open (max 0 (floor (apply min xs)))
+                              (min (- width 1) (floor (apply max xs)))
+                              solid))))))))
 
 ; Transform a seg into view space, clip it to the near plane, project it,
 ; and draw its visible columns.
@@ -108,10 +143,11 @@
         st)))
 
 (def project (sg v st s1 z1 u1 s2 z2 u2)
-  (withs (sx1 (+ half-w (/ (* s1 focal) z1))
-          sx2 (+ half-w (/ (* s2 focal) z2))
+  (withs ((width height view-h half-w half-h focal-x . srest) (nth 11 v)
+          sx1 (+ half-w (/ (* s1 focal-x) z1))
+          sx2 (+ half-w (/ (* s2 focal-x) z2))
           xa  (max 0 (ceil (- sx1 0.5)))
-          xb  (min (- screen-w 1) (- (ceil (- sx2 0.5)) 1)))
+          xb  (min (- width 1) (- (ceil (- sx2 0.5)) 1)))
     (if (and (< sx1 sx2) (<= xa xb) (range-open xa xb (cadr st)))
         (withs (iz1 (/ 1 z1)
                 iz2 (/ 1 z2)
@@ -125,16 +161,16 @@
 
 ; Distance to a floor or ceiling is constant along a screen row, and so is
 ; its light, so a plane gets a table of (distance . colormap) per row.
-(def plane-table (start h cmaps)
-  (let h (max h 1)
-    (map [let z (/ (* h focal) (max (abs (- half-h _ 0.5)) 0.5))
+(def plane-table (start h cmaps scr)
+  (let ((width height view-h half-w half-h focal-x focal-y . srest) h) (list scr (max h 1))
+    (map [let z (/ (* h focal-y) (max (abs (- half-h _ 0.5)) 0.5))
            (cons z (nth (+ 1 (clamp (floor (- start (/ 1280 z))) 0 31)) cmaps))]
          (iota view-h))))
 
-(def with-plane (planes start h cmaps)
+(def with-plane (planes start h cmaps scr)
   (if (get (list start h) planes)
       planes
-      (cons (cons (list start h) (plane-table start h cmaps)) planes)))
+      (cons (cons (list start h) (plane-table start h cmaps scr)) planes)))
 
 (def plane (planes start h)
   (cdr (get (list start h) planes)))
@@ -150,7 +186,7 @@
 
 ; Rows ya.. of a wall column.  v is the texture row at the center of row
 ; ya; it grows by step (map units per pixel) down the column.
-(def wall-pixels (tex n ya u ttop step cm)
+(def wall-pixels (tex n ya u ttop step cm half-h)
   (if (no tex)
       (fill n (nchar 0))
       (let (w h cols . rest) tex
@@ -166,7 +202,8 @@
 ; below it, and its wall pieces, narrowing the column's open rows.
 (def draw-seg (sg v st xa xb iz uz diz duz)
   (withs ((x1 y1 x2 y2 slen uoff yoff fi bi peg-top peg-bottom fake upper mid lower) sg
-          (px py vz vcos vsin heights lv angle skycols rays) v
+          (px py vz vcos vsin heights lv angle skycols rays scr) v
+          (width height view-h half-w half-h focal-x focal-y . srest) scr
           (cols solid count planes masked seen) st
           sectors (at 'sectors lv)
           cmaps   (at 'colormaps lv)
@@ -175,7 +212,7 @@
           (bf bc) (if bi (nth (+ bi 1) heights) '(0 0))
           bsky    (and bi (cadr (nth (+ bi 1) sectors)))
           start   (light-start light)
-          planes  (with-plane (with-plane planes start (- vz ff) cmaps) start (- fc vz) cmaps)
+          planes  (with-plane (with-plane planes start (- vz ff) cmaps scr) start (- fc vz) cmaps scr)
           ftab    (plane planes start (- vz ff))
           ctab    (plane planes start (- fc vz))
           fh      (- ff vz)
@@ -196,8 +233,8 @@
                                (list c nil)
                                (withs (z     (/ 1 iz)
                                        u     (* uz z)
-                                       k     (* focal iz)
-                                       step  (/ z focal)
+                                       k     (* focal-y iz)
+                                       step  (/ z focal-y)
                                        cm    (nth (+ 1 (clamp (floor (- wstart (min (* 1280 iz) 23))) 0 31))
                                                   cmaps)
                                        yt    (ceil (- half-h (* ch k) 0.5))
@@ -223,12 +260,12 @@
                                                    bot2
                                                    (if (> top2 top1)
                                                        (cons (wall-pixels upper (- top2 top1) top1 u
-                                                                          (+ ttop yoff) step cm)
+                                                                          (+ ttop yoff) step cm half-h)
                                                              tops1)
                                                        tops1)
                                                    (if (> bot1 bot2)
                                                        (cons (wall-pixels lower (- bot1 bot2) (+ bot2 1) u
-                                                                          (+ btop yoff) step cm)
+                                                                          (+ btop yoff) step cm half-h)
                                                              bots1)
                                                        bots1)
                                                    (if (or (> top2 top) (< bot2 bot))
@@ -240,7 +277,7 @@
                                                  bot1
                                                  (if (>= bot1 top1)
                                                      (cons (wall-pixels mid (- bot1 top1 -1) top1 u
-                                                                        (+ ttop yoff) step cm)
+                                                                        (+ ttop yoff) step cm half-h)
                                                            tops1)
                                                      tops1)
                                                  bots1
@@ -275,10 +312,11 @@
   (map [nth (+ 1 (mod (floor (* (+ angle _) (/ 512 pi))) 256)) (at 'sky-tables lv)]
        (at 'xangles lv)))
 
-(def view-rays (vcos vsin)
-  (map [let k (/ (- (+ _ 0.5) half-w) focal)
-         (cons (+ vcos (* k vsin)) (- vsin (* k vcos)))]
-       (iota screen-w)))
+(def view-rays (scr vcos vsin)
+  (let (width height view-h half-w half-h focal-x . srest) scr
+    (map [let k (/ (- (+ _ 0.5) half-w) focal-x)
+           (cons (+ vcos (* k vsin)) (- vsin (* k vcos)))]
+         (iota width))))
 
 ;;;; Sprites
 
@@ -318,7 +356,8 @@
        8))
 
 (def draw-sprite (cols clips w v m z s)
-  (withs ((px py vz vcos vsin heights lv . rest) v
+  (withs ((px py vz vcos vsin heights lv angle skycols rays scr) v
+          (width height view-h half-w half-h focal-x focal-y . srest) scr
           rots (cdr (get (sym (snoc (at 'sprite m) (thing-frame m (at 'tic w))))
                          (at 'sprite-frames lv))))
     (if (no rots)
@@ -330,15 +369,17 @@
                 si    (at 'sec m)
                 (flo cei) (nth (+ si 1) heights)
                 mz    (or (at 'z m) (if (= (at 'class m) 'hanging) (- cei to) flo))
-                scale (/ focal z)
-                step  (/ z focal)
-                iz    (/ 1 z)
-                x1    (+ half-w (* (- s lo) scale))
-                xa    (max 0 (ceil (- x1 0.5)))
-                xb    (min (- screen-w 1) (- (ceil (- (+ x1 (* pw scale)) 0.5)) 1))
-                ytop  (- half-h (* (- (+ mz to) vz) scale))
-                ya0   (ceil (- ytop 0.5))
-                yb0   (- (ceil (- (+ ytop (* ph scale)) 0.5)) 1)
+                xscale (/ focal-x z)
+                xstep  (/ z focal-x)
+                yscale (/ focal-y z)
+                ystep  (/ z focal-y)
+                iz     (/ 1 z)
+                x1     (+ half-w (* (- s lo) xscale))
+                xa     (max 0 (ceil (- x1 0.5)))
+                xb     (min (- width 1) (- (ceil (- (+ x1 (* pw xscale)) 0.5)) 1))
+                ytop   (- half-h (* (- (+ mz to) vz) yscale))
+                ya0    (ceil (- ytop 0.5))
+                yb0    (- (ceil (- (+ ytop (* ph yscale)) 0.5)) 1)
                 cmaps (at 'colormaps lv)
                 cm    (if (at 'bright m)
                           (car cmaps)
@@ -351,13 +392,13 @@
               (overlay-columns
                 cols xa
                 (map (fn (x evs)
-                       (withs (tx        (clamp (floor (* (- (+ x 0.5) x1) step)) 0 (- pw 1))
+                       (withs (tx        (clamp (floor (* (- (+ x 0.5) x1) xstep)) 0 (- pw 1))
                                ev        (find [> (car _) iz] evs)
                                (top bot) (if ev (cdr ev) (list 0 (- view-h 1)))
                                ya        (max ya0 top)
                                yb        (min yb0 bot))
                          (if (<= ya yb)
-                             (cons ya (sprite-run (- yb ya -1) (* (- (+ ya 0.5) ytop) step) step
+                             (cons ya (sprite-run (- yb ya -1) (* (- (+ ya 0.5) ytop) ystep) ystep
                                                   (nth (+ 1 (if flip (- pw 1 tx) tx)) pcols) cm nil)))))
                      (iota-from (- xb xa -1) xa)
                      (first (- xb xa -1) (drop xa clips)))))))))
@@ -390,9 +431,9 @@
 ; drawn once between floor and ceiling.  Each column was recorded as
 ; (x 1/z u top bottom colormap).
 (def draw-masked (cols v mcols tex mtop)
-  (let (w h walls masked) tex
+  (let ((w h walls masked) (width height view-h half-w half-h focal-x focal-y . srest)) (list tex (nth 11 v))
     (foldl (fn ((x iz u top bot cm) cols)
-             (withs (k    (* focal iz)
+             (withs (k    (* focal-y iz)
                      ytop (- half-h (* mtop k))
                      ya   (max top (ceil (- ytop 0.5)))
                      yb   (min bot (- (ceil (- (+ ytop (* h k)) 0.5)) 1)))
@@ -407,34 +448,24 @@
 ;;;; Pictures: the weapon and the status bar
 
 ; The pixels of a picture placed at Doom's 320x200 screen coordinates,
-; sampling every k-th pixel at our resolution (k is 2 at 160x100), for
-; screen rows ya..yb: (first-column . data) for overlay-columns, with rows
-; counted from row0.
-(def picture-data (pic x y cm ya yb row0)
-  (let (w h lo to cols) pic
-    (withs (k    (/ 320 screen-w)
-            left (floor (- x lo))
+; sampled through the screen's maps, over screen rows ya..yb:
+; (first-column . data) for overlay-columns, with rows counted from row0.
+(def picture-data (pic x y cm ya yb row0 scr)
+  (let ((w h lo to cols) (width height view-h half-w half-h focal-x focal-y xmap ymap)) (list pic scr)
+    (withs (left (floor (- x lo))
             top  (floor (- y to))
-            sxa  (max 0 (ceil (/ left k)))
-            sxb  (min (- screen-w 1) (floor (/ (+ left w -1) k)))
-            sya  (max ya (ceil (/ top k)))
-            syb  (min yb (floor (/ (+ top h -1) k))))
-      (if (and (<= sxa sxb) (<= sya syb))
-          (cons sxa
-                (map [cons (- sya row0)
-                           (picture-run (- syb sya -1)
-                                        (drop (- (* k sya) top) (nth (+ 1 (- (* k _) left)) cols))
-                                        k cm nil)]
-                     (iota-from (- sxb sxa -1) sxa)))))))
+            xs   (keep [<= left (nth (+ _ 1) xmap) (+ left w -1)] (iota width))
+            ys   (keep [<= top (nth (+ _ 1) ymap) (+ top h -1)] (iota-from (- yb ya -1) ya))
+            src  (map [- (nth (+ _ 1) ymap) top] ys))
+      (if (and xs ys)
+          (cons (car xs)
+                (map [let pcol (nth (+ 1 (- (nth (+ _ 1) xmap) left)) cols)
+                       (cons (- (car ys) row0)
+                             (map [let c (nth (+ _ 1) pcol) (if (> c 0) (nth c cm))] src))]
+                     xs))))))
 
-(def picture-run (n pp k cm acc)
-  (if (> n 0)
-      (picture-run (- n 1) (drop k pp) k cm
-                   (cons (let c (car pp) (if (and c (> c 0)) (nth c cm))) acc))
-      (rev acc)))
-
-(def draw-picture (cols lv name x y cm ya yb row0)
-  (let d (picture-data (cdr (get name (at 'pictures lv))) x y cm ya yb row0)
+(def draw-picture (cols lv name x y cm ya yb row0 scr)
+  (let d (picture-data (cdr (get name (at 'pictures lv))) x y cm ya yb row0 scr)
     (if d (overlay-columns cols (car d) (cdr d)) cols)))
 
 (set pistol-frames (map [cons _ (sym (list \P \I \S \G _ \0))] "ABC"))
@@ -442,6 +473,8 @@
 (def draw-weapon (w cols)
   (if (> (at 'health w) 0)
       (withs (lv    (at 'lv w)
+              scr   (at 'screen w)
+              vh    (caddr scr)
               wt    (at 'wtics w)
               frame (if (> wt 9) \B (> wt 5) \C (> wt 2) \B \A)
               phase (* (at 'tic w) 0.2)
@@ -453,9 +486,9 @@
                                      0 31))
                          cmaps)
               lit   (if (> wt 9)
-                        (draw-picture cols lv 'PISFA0 (+ 1 bx) (+ 16 by) (car cmaps) 0 (- view-h 1) 0)
+                        (draw-picture cols lv 'PISFA0 (+ 1 bx) (+ 16 by) (car cmaps) 0 (- vh 1) 0 scr)
                         cols))
-        (draw-picture lit lv (cdr (get frame pistol-frames)) (+ 1 bx) (+ 16 by) cm 0 (- view-h 1) 0))
+        (draw-picture lit lv (cdr (get frame pistol-frames)) (+ 1 bx) (+ 16 by) cm 0 (- vh 1) 0 scr))
       cols))
 
 ; Doom flashes the palette red when you are hurt and gold when you pick
@@ -476,12 +509,12 @@
 
 ; The status bar: STBAR, the arms panel, ammo, health and armor in big red
 ; digits, and the face.  Only rebuilt when one of them changes.
-(def hud-columns (lv state)
-  (let (health armor ammo face) state
+(def hud-columns (lv state scr)
+  (let ((health armor ammo face) (width height view-h . srest)) (list state scr)
     (withs (cm   (car (at 'colormaps lv))
-            draw (fn (cols name x y) (draw-picture cols lv name x y cm view-h (- screen-h 1) view-h))
+            draw (fn (cols name x y) (draw-picture cols lv name x y cm view-h (- height 1) view-h scr))
             bar  (foldl (fn ((name x y) cols) (draw cols name x y))
-                        (fill screen-w (fill (- screen-h view-h) (nchar 0)))
+                        (fill width (fill (- height view-h) (nchar 0)))
                         (list '(STBAR 0 168) '(STARMS 104 168)
                               '(STYSNUM2 111 172) '(STGNUM3 123 172) '(STGNUM4 135 172)
                               '(STGNUM5 111 182) '(STGNUM6 123 182) '(STGNUM7 135 182)

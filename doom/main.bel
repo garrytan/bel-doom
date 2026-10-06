@@ -21,15 +21,12 @@
 
 ;;;; Screen
 
-; Doom's low-detail 160x100.  For high detail, load doom/hires.bel before
-; doom-init.  The status bar takes the bottom 16%, as in Doom, and
-; the projection gives a 90 degree field of view.
+; The screen size is a parameter of doom-init, which builds the screen
+; record (see make-screen in render.bel).  These two are only the default
+; size, for hosts that don't pass one: Doom's low-detail 160x100, or
+; 320x200 after loading doom/hires.bel.
 (set screen-w 160
-     screen-h 100
-     view-h   84
-     half-w   80
-     half-h   42
-     focal    80)
+     screen-h 100)
 
 (set near 1)              ; near clipping plane, in map units
 
@@ -57,7 +54,7 @@
                                               '(0 1 2)))
                                 '(0 1 2 3 4)))))
 
-(def new-world (bytes)
+(def new-world (bytes scr)
   (withs (lumps    (wad-lumps bytes)
           palette  (first 768 (lump 'PLAYPAL lumps))
           rgb      (palette-rgb palette)
@@ -67,8 +64,8 @@
           sprites  (map car (sprite-lumps lumps))
           lv       (append (list (cons 'palette palette)
                                  (cons 'colormaps cmaps)
-                                 (cons 'sky-tables (sky-tables (cdr (get 'SKY1 textures)) (car cmaps)))
-                                 (cons 'xangles (map [atan (/ (- half-w _ 0.5) focal)] (iota screen-w)))
+                                 (cons 'sky-tables (sky-tables (cdr (get 'SKY1 textures)) (car cmaps) scr))
+                                 (cons 'xangles (x-angles scr))
                                  (cons 'pictures (map [cons _ (picture (lump _ lumps))]
                                                       (append sprites hud-pictures)))
                                  (cons 'sprite-frames (sprite-frames sprites))
@@ -77,32 +74,49 @@
                            level))
     (update-hud
       (reset-player
-        (list (cons 'lv lv) (cons 'tic 0) (cons 'rnd 0)
+        (list (cons 'lv lv) (cons 'screen scr) (cons 'tic 0) (cons 'rnd 0)
               (cons 'heights (at 'heights level)) (cons 'movers nil)
               (cons 'mobjs (spawn-things lv)) (cons 'next-id 10000)
               (cons 'used nil) (cons 'sounds nil) (cons 'blasts nil) (cons 'hud nil))))))
 
 ; For each sky texture column, its pixels down the view, which only depend
-; on the screen row.
-(def sky-tables (sky cm)
-  (let (w h cols . rest) sky
+; on the screen row.  Doom puts sky row 100 at the middle of its 168-row
+; view, so the row at Doom screen row y is y + 16.
+(def sky-tables (sky cm scr)
+  (let ((w h cols . rest) (width height view-h half-w half-h focal-x focal-y xmap ymap)) (list sky scr)
     (map (fn (tc)
-           (map [nth (nth (+ 1 (mod (floor (+ 100 (* (/ 320 screen-w) (- _ half-h)))) h)) tc) cm]
+           (map [nth (nth (+ 1 (mod (+ (nth (+ _ 1) ymap) 16) h)) tc) cm]
                 (iota view-h)))
          cols)))
 
+; The angle of each screen column from the view direction.
+(def x-angles (scr)
+  (let (width height view-h half-w half-h focal-x . rest) scr
+    (map [atan (/ (- half-w _ 0.5) focal-x)] (iota width))))
+
 ;;;; Entry points: the only side effects
 
-(def doom-init ((o path "wad/e1m1.wad"))
-  (let w (new-world (read-bytes path))
+; Read the WAD, write the palette packet, return the world for a screen of
+; width x height.
+(def doom-init ((o path "wad/e1m1.wad") (o width screen-w) (o height screen-h))
+  (let w (new-world (read-bytes path) (make-screen width height))
     (prc \P)
     (pr (map nchar (at 'palette (at 'lv w))))
     w))
 
-(def doom-frame (w (o keys ""))
+; One tic of the game: the next world, after writing that tic's sounds.
+(def doom-tick (w (o keys ""))
   (let w2 (step w keys)
     (if (at 'sounds w2)
         (pr (apply append (map [append "S" _ (list (nchar 10))] (rev (at 'sounds w2))))))
-    (prc \F)
-    (apply pr (render w2))
     w2))
+
+; Draw the world: write the frame packet and return the world unchanged.
+(def doom-draw (w)
+  (prc \F)
+  (apply pr (render w))
+  w)
+
+; A tic and its frame, for hosts that draw every tic.
+(def doom-frame (w (o keys ""))
+  (doom-draw (doom-tick w keys)))

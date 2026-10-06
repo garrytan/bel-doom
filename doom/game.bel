@@ -372,4 +372,4 @@
   (let state (list (at 'health w) (at 'armor w) (at 'ammo w) (face w))
     (if (= state (car (at 'hud w)))
         w
-        (puts w 'hud (cons state (hud-columns (at 'lv w) state))))))
+        (puts w 'hud (cons state (hud-columns (at 'lv w) state (at 'screen w)))))))
