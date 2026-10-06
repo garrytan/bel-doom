@@ -2,7 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0a0a">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Bel Doom">
 <title>Bel Doom</title>
 <style>
   :root { --red: #c4151c; --bg: #0a0a0a; --fg: #c9c9c9; --dim: #6b6b6b; }
@@ -35,6 +40,51 @@
   .src a:hover { color: var(--red); }
   #frame:fullscreen { border: 0; box-shadow: none; }
   kbd { color: var(--fg); border: 1px solid #333; border-radius: 3px; padding: 0 4px; font: inherit; }
+  #fps, #snd { cursor: pointer; }
+
+  /* Touch screens: the game on top (portrait) or in the middle (landscape), controls around it. */
+  body.touch { justify-content: flex-start; height: 100vh; height: 100dvh; gap: 6px; overflow: hidden; overscroll-behavior: none;
+    touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+    padding: max(6px, env(safe-area-inset-top)) max(6px, env(safe-area-inset-right)) max(6px, env(safe-area-inset-bottom)) max(6px, env(safe-area-inset-left)); }
+  body.touch .keys, body.touch .src, body.touch #held { display: none; }
+  body.touch h1 { font-size: 12px; padding-right: 92px; align-self: stretch; text-align: center; }
+  body.touch #bar { font-size: 11px; flex-wrap: wrap; gap: 2px 10px; position: relative; z-index: 11; }
+  @media (orientation: portrait) {
+    body.touch #frame, body.touch #bar { width: min(100%, calc((100vh - 48vmin - 90px) * 4 / 3)); width: min(100%, calc((100dvh - 48vmin - 90px) * 4 / 3)); }
+  }
+  @media (orientation: landscape) {
+    body.touch { justify-content: center; }
+    body.touch #frame, body.touch #bar { width: min(100%, calc((100vh - 70px) * 4 / 3)); width: min(100%, calc((100dvh - 70px) * 4 / 3)); }
+  }
+  @media (orientation: landscape) and (max-height: 540px) {
+    body.touch h1 { display: none; }
+    body.touch #frame, body.touch #bar { width: min(100%, calc((100vh - 56px) * 4 / 3)); width: min(100%, calc((100dvh - 56px) * 4 / 3)); }
+  }
+  body.touch #overlay { cursor: pointer; }
+  #touch, #touchbar { display: none; }
+  body.touch.running #touch, body.touch.running #touchbar { display: block; }
+  #touch { position: fixed; inset: 0; z-index: 10; pointer-events: none; --u: min(1vmin, 5.4px); }
+  #touch .zone { position: absolute; left: 0; top: 0; width: 50%; height: 100%; pointer-events: auto; touch-action: none; }
+  #touch .stick { position: absolute; width: calc(var(--u) * 34); height: calc(var(--u) * 34); margin: calc(var(--u) * -17) 0 0 calc(var(--u) * -17);
+    left: calc(env(safe-area-inset-left) + var(--u) * 24); top: calc(100% - env(safe-area-inset-bottom) - var(--u) * 26);
+    border-radius: 50%; border: 2px solid rgba(255, 255, 255, .2); background: rgba(255, 255, 255, .05); pointer-events: none; opacity: .5; }
+  #touch .stick.active { opacity: 1; }
+  #touch .knob { position: absolute; left: 50%; top: 50%; width: 44%; height: 44%; margin: -22% 0 0 -22%; border-radius: 50%;
+    background: rgba(196, 21, 28, .55); border: 2px solid rgba(255, 120, 120, .6); }
+  #touch .btn { position: absolute; padding: 0; pointer-events: auto; touch-action: none; border-radius: 50%;
+    border: 2px solid rgba(196, 21, 28, .8); background: rgba(196, 21, 28, .22); color: #f2f2f2;
+    font: 700 calc(var(--u) * 3.4)/1 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .08em; -webkit-tap-highlight-color: transparent; }
+  #touch .btn.down { background: rgba(196, 21, 28, .65); }
+  #touch .fire { right: calc(env(safe-area-inset-right) + var(--u) * 5); bottom: calc(env(safe-area-inset-bottom) + var(--u) * 8);
+    width: calc(var(--u) * 24); height: calc(var(--u) * 24); font-size: calc(var(--u) * 4.2); }
+  #touch .use { right: calc(env(safe-area-inset-right) + var(--u) * 31); bottom: calc(env(safe-area-inset-bottom) + var(--u) * 20);
+    width: calc(var(--u) * 15); height: calc(var(--u) * 15); }
+  #touch .strafe { bottom: calc(env(safe-area-inset-bottom) + var(--u) * 35); width: calc(var(--u) * 12); height: calc(var(--u) * 12); border-radius: 30%; }
+  #touch .strafe.left { right: calc(env(safe-area-inset-right) + var(--u) * 18); }
+  #touch .strafe.right { right: calc(env(safe-area-inset-right) + var(--u) * 4); }
+  #touchbar { position: fixed; z-index: 12; top: max(6px, env(safe-area-inset-top)); right: max(6px, env(safe-area-inset-right)); }
+  #touchbar button { width: 40px; height: 34px; margin-left: 6px; padding: 0; border: 1px solid #333; border-radius: 6px;
+    background: rgba(20, 20, 20, .8); color: var(--fg); font: 15px/1 ui-monospace, Menlo, monospace; touch-action: manipulation; }
 </style>
 </head>
 <body>
@@ -56,6 +106,8 @@
     <kbd>Shift</kbd> run &middot; <kbd>Ctrl</kbd>/<kbd>F</kbd> fire &middot; <kbd>Space</kbd>/<kbd>U</kbd> use &middot; <kbd>M</kbd> mute &middot; <kbd>`</kbd> stats &middot; <kbd>Esc</kbd> pause &middot; double-click fullscreen
   </div>
   <div class="src">engine <a href="../doom/main.bel">doom/*.bel</a> &middot; interpreter <a href="../interp/bel.js">interp/bel.js</a> running <a href="../interp/bel.bel">bel.bel</a> &middot; map from Freedoom</div>
+  <div id="touch"></div>
+  <div id="touchbar"><button id="pausebtn" aria-label="pause">&#10074;&#10074;</button><button id="fsbtn" aria-label="fullscreen">&#10530;</button></div>
   <script type="module" src="main.js"></script>
 </body>
 </html>

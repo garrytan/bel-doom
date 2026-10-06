@@ -11,10 +11,12 @@ const MAX_CATCHUP = 5;
 const TIC_MS = 1000 / TIC_RATE;
 const MIN_SLICE = 8;
 
-export function autoWorkers() {
+// Workers for a screen size: one per 40,000 pixels (1 at 160x100, 2 at 320x200, 8 at 640x480), capped by
+// cores and memory, since each worker holds a whole engine.
+export function autoWorkers([w, h] = [160, 100]) {
   const cores = navigator.hardwareConcurrency || 2;
   const byMemory = navigator.deviceMemory ? Math.floor((navigator.deviceMemory * 1024 * 0.6) / 600) : 2;
-  return Math.max(1, Math.min(cores - 2, 8, byMemory));
+  return Math.max(1, Math.min(cores - 2, 8, byMemory, Math.ceil((w * h) / 40000)));
 }
 
 // count: number of workers; auto: drop to one worker when the engine has no doom-draw-slice.

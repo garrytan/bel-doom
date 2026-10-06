@@ -156,7 +156,7 @@ node bin/serve.mjs 8080          # open http://localhost:8080
 node bin/doom-term.mjs           # or play in a terminal, with truecolor half-block pixels
 ```
 
-Keys: arrows or WASD move and turn, Q/E strafe, Shift runs, Ctrl or F fires, Space or U opens doors, M mutes, Esc pauses. The only requirement is Node (tested with Node 24); there is nothing to install.
+Keys: arrows or WASD move and turn, Q/E strafe, Shift runs, Ctrl or F fires, Space or U opens doors, M mutes, Esc pauses. On phones and tablets the page shows touch controls instead: drag anywhere on the left half to move and turn (past the ring to run), and use the FIRE, USE and strafe buttons on the right. On an iPhone, where web pages can't go full screen, Add to Home Screen opens the game without Safari's toolbars. The only requirement is Node (tested with Node 24); there is nothing to install.
 
 Bel on its own:
 
@@ -215,6 +215,7 @@ This repository's own code is MIT licensed; see [LICENSE](LICENSE). The license 
 
 ## Changelog
 
+- 2026-10-06: Touch controls for phones and tablets.
 - 2026-10-06: 640x480 at 35 frames a second: a second compiler (Bel to JavaScript source), a renderer that allocates half as much, and a multi-worker renderer in the browser.
 - 2026-10-06: README rewritten for a general audience; full interpreter reference in `docs/interpreter.md`; GitHub Pages entry point; MIT license.
 - 2026-10-05: First version: interpreter, functional Doom engine, browser, terminal and video front ends, sound.
