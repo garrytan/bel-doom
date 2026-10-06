@@ -25,7 +25,7 @@ class Sym {
 }
 
 class Pair {
-  constructor(a, d) { this.a = a; this.d = d; this.x = null; this.c = null; }
+  constructor(a, d) { this.a = a; this.d = d; this.x = null; this.c = null; this.k = false; }
 }
 
 class Char {
@@ -712,7 +712,7 @@ function ev(e, a, w) {
         if (w && tag === TAB) {
           for (let p = f.d.d; p instanceof Pair; p = p.d) if (equal(p.a.a, args[0])) return list(p.a, D);
           const kv = new Pair(args[0], NIL);
-          epoch++;
+          if (f.d.k) epoch++;
           f.d.d = new Pair(kv, f.d.d);
           return list(kv, D);
         }
@@ -827,7 +827,7 @@ function assign(p, v, a) {
   const cell = loc.a, which = loc.d.a;
   if (!(cell instanceof Pair)) return sigerr(sym('bad-place'));
   if (which === A) cell.a = v;
-  else if (which === D) { epoch++; assignCell(cell, v); }
+  else if (which === D) { if (cell.k) epoch++; assignCell(cell, v); }
   else return sigerr(sym('bad-place'));
   return v;
 }
@@ -1576,7 +1576,7 @@ function enq(c, q) {
     p = q.x;
   }
   const cell = new Pair(c, NIL);
-  epoch++;
+  if (p.k) epoch++;
   p.d = cell;
   q.x = cell;
 }
@@ -1611,8 +1611,9 @@ function writeText(text, s) {
 
 // CDR-coding cache, in the spirit of the Lisp Machine: a list that is indexed
 // repeatedly gets a hidden vector of its cells, so nth and drop become O(1).
-// Any structural mutation (xdr) bumps a global epoch and invalidates every
-// cache; car mutation (xar) is safe because the vector holds cells.
+// A structural mutation (xdr) of a cell that sits in some vector bumps a
+// global epoch and invalidates every cache; car mutation (xar) is safe
+// because the vector holds cells.
 let epoch = 0;
 class CellVec {
   constructor() { this.hits = 0; this.ep = -1; this.cells = null; this.ring = false; this.done = false; }
@@ -1625,6 +1626,7 @@ function cellsUpTo(xs, n) {
   if (c.ep !== epoch) {
     if (++c.hits < 3) return null;
     c.cells = [xs];
+    xs.k = true;
     c.ring = false;
     c.done = false;
     c.ep = epoch;
@@ -1634,6 +1636,7 @@ function cellsUpTo(xs, n) {
     const p = cells[cells.length - 1].d;
     if (!(p instanceof Pair)) { c.done = true; break; }
     if (p === xs) { c.ring = true; c.done = true; break; }
+    p.k = true;
     cells.push(p);
   }
   return c;
@@ -1758,7 +1761,7 @@ const prims = {
   },
   xdr: (a) => {
     if (!(a[0] instanceof Pair)) return sigerr(sym('xdr-on-atom'));
-    epoch++;
+    if (a[0].k) epoch++;
     a[0].d = a[1];
     return a[1];
   },
